@@ -4,25 +4,12 @@
 #include <libsec.h>
 #include "../vpnfs.h"
 
+static const char clthello[] = "GFtype\0clthello\0SVPNCOOKIE";
+
 typedef struct FortinetPriv FortinetPriv;
 struct FortinetPriv {
 	int auth_fd;
 };
-
-static int
-read_exact(int fd, uchar *buf, int n)
-{
-	int got, total;
-
-	total = 0;
-	while(total < n){
-		got = read(fd, buf + total, n - total);
-		if(got <= 0)
-			return -1;
-		total += got;
-	}
-	return total;
-}
 
 static char*
 extract_cookie(char *resp, char *cookie_name)
@@ -254,105 +241,103 @@ fortinet_auth(VpnSession *s)
 static int
 fortinet_connect_tunnel(VpnSession *s)
 {
-	int raw_fd, tls_fd;
+	char addr[256];
+	uchar pkt[1024];
+	uchar resp[1024];
+	int udp_fd, pkt_len, cookie_len, n;
+	char *cookie_val;
 
 	if(s->cookie[0] == '\0'){
 		fprint(2, "vpnfs: no session cookie available for tunnel connection\n");
 		return -1;
 	}
 
+	/* Extrai apenas o valor do SVPNCOOKIE (remove o prefixo SVPNCOOKIE= se existir) */
+	cookie_val = strchr(s->cookie, '=');
+	if(cookie_val != nil)
+		cookie_val++;
+	else
+		cookie_val = s->cookie;
+
 	if(s->cfg->verbose)
-		print("vpnfs: establishing SSL-VPN binary tunnel to %s...\n", s->cfg->host);
+		print("vpnfs: establishing UDP tunnel to %s:%s...\n", s->cfg->host, s->cfg->port);
 
-	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-	if(raw_fd < 0)
-		return -1;
-
-	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-	if(tls_fd < 0)
-		return -1;
-
-	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cfg->port, s->cookie) < 0){
-		close(tls_fd);
+	/* Dial UDP nativo do Plan 9 */
+	snprint(addr, sizeof(addr), "udp!%s!%s", s->cfg->host, s->cfg->port);
+	udp_fd = dial(addr, nil, nil, nil);
+	if(udp_fd < 0){
+		fprint(2, "vpnfs: dial UDP %s failed: %r\n", addr);
 		return -1;
 	}
 
-	s->tls_fd = tls_fd;
+	/* Monta o pacote clthello:
+	 * Headers: "GFtype\0clthello\0SVPNCOOKIE\0" + cookie_val + "\0"
+	 */
+	cookie_len = strlen(cookie_val);
+
+	/* Offset do payload apos os 2 bytes de tamanho */
+	pkt_len = 2;
+	memmove(pkt + pkt_len, clthello, sizeof(clthello));
+	pkt_len += sizeof(clthello);
+	memmove(pkt + pkt_len, cookie_val, cookie_len + 1);
+	pkt_len += cookie_len + 1;
+
+	/* Insere o tamanho total do payload nos primeiros 2 bytes (Big Endian) */
+	pkt[0] = ((pkt_len - 2) >> 8) & 0xFF;
+	pkt[1] = (pkt_len - 2) & 0xFF;
 
 	if(s->cfg->verbose)
-		print("vpnfs: tunnel connection established on fd %d\n", tls_fd);
+		print("vpnfs: sending UDP clthello handshake (%d bytes)...\n", pkt_len);
 
+	if(write(udp_fd, pkt, pkt_len) != pkt_len){
+		fprint(2, "vpnfs: write clthello to UDP socket failed: %r\n");
+		close(udp_fd);
+		return -1;
+	}
+
+	/* Recebe o svrhello do servidor */
+	memset(resp, 0, sizeof(resp));
+	n = read(udp_fd, resp, sizeof(resp) - 1);
+	if(n <= 0){
+		fprint(2, "vpnfs: no response received for UDP clthello: %r\n");
+		close(udp_fd);
+		return -1;
+	}
+
+	if(s->cfg->verbose){
+		int i;
+		print("vpnfs: received UDP svrhello response (%d bytes):\n", n);
+		for(i = 0; i < (n < 64 ? n : 64); i++)
+			print(" %02x", resp[i]);
+		print("\n");
+	}
+
+	s->tls_fd = udp_fd; /* Armazena o socket UDP ativo */
 	return 0;
 }
 
 static int
 fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 {
-	uchar hdr[FORTINET_HDR_LEN];
-	int payload_len, frame_len, i;
+	int n;
 
-	if(read_exact(s->tls_fd, hdr, FORTINET_HDR_LEN) < 0)
+	n = read(s->tls_fd, buf, maxlen);
+	if(n <= 0)
 		return -1;
-
-	/* Se os primeiros bytes nao forem 'P' 'A' (0x50 0x41), imprima o hex dump para diagnostico */
-	if(hdr[0] != FORTINET_HDR_MAGIC1 || hdr[1] != FORTINET_HDR_MAGIC2){
-		fprint(2, "vpnfs: invalid magic! raw header bytes:\n");
-		for(i = 0; i < FORTINET_HDR_LEN; i++)
-			fprint(2, " %02x", hdr[i]);
-		fprint(2, " | ASCII: ");
-		for(i = 0; i < FORTINET_HDR_LEN; i++)
-			fprint(2, "%c", (hdr[i] >= 32 && hdr[i] <= 126) ? hdr[i] : '.');
-		fprint(2, "\n");
-		return -1;
-	}
-
-	frame_len = (hdr[2] << 8) | hdr[3];
-	payload_len = frame_len - FORTINET_HDR_LEN;
-
-	if(payload_len < 0 || payload_len > maxlen){
-		fprint(2, "vpnfs: invalid payload length: %d\n", payload_len);
-		return -1;
-	}
-
-	if(payload_len > 0){
-		if(read_exact(s->tls_fd, buf, payload_len) < 0)
-			return -1;
-	}
 
 	if(s->cfg->verbose)
-		print("vpnfs: rx frame_len=%d payload=%d (flags=0x%02x)\n", frame_len, payload_len, hdr[4]);
+		print("vpnfs: rx UDP packet len=%d\n", n);
 
-	return payload_len;
+	return n;
 }
 
 static int
 fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 {
-	uchar frame[VPN_BUFSIZE];
-	int frame_len;
-
-	frame_len = FORTINET_HDR_LEN + len;
-	if(frame_len > sizeof(frame)){
-		fprint(2, "vpnfs: packet payload exceeds buffer size (%d > %d)\n", len, (int)sizeof(frame) - FORTINET_HDR_LEN);
+	if(write(s->tls_fd, buf, len) != len){
+		fprint(2, "vpnfs: write UDP packet failed: %r\n");
 		return -1;
 	}
-
-	/* Pack Fortinet 12-byte Header */
-	frame[0] = FORTINET_HDR_MAGIC1; /* 0x50 ('P') */
-	frame[1] = FORTINET_HDR_MAGIC2; /* 0x41 ('A') */
-	frame[2] = (frame_len >> 8) & 0xFF;
-	frame[3] = frame_len & 0xFF;
-	frame[4] = 0x01;                /* Packet flags / control */
-	memset(frame + 5, 0, 7);         /* Reserved fields */
-
-	/* Payload */
-	memmove(frame + FORTINET_HDR_LEN, buf, len);
-
-	if(write(s->tls_fd, frame, frame_len) != frame_len){
-		fprint(2, "vpnfs: write packet failed: %r\n");
-		return -1;
-	}
-
 	return len;
 }
 

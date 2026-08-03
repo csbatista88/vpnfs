@@ -1,6 +1,6 @@
 # `vpnfs` Architecture & Specification
 
-`vpnfs` is a native 9front (Plan 9) VPN client and file/network driver interface. It enables secure network tunneling over HTTPS/TLS protocols, starting with support for **Fortinet SSL-VPN**.
+`vpnfs` is a native 9front (Plan 9) VPN client and file/network driver interface. It enables secure network tunneling over HTTPS and UDP/DTLS protocols, starting with support for **Fortinet SSL-VPN**.
 
 ---
 
@@ -13,7 +13,7 @@
   #include <libc.h>
   #include "vpnfs.h"
   ```
-- **TLS Infrastructure:** Plan 9 manages TLS in the kernel/network stack via `/net/tls`. Connections are initialized via `dial()` to obtain an IP socket, then upgraded using `pushtls()` or by opening `/net/tls/clone`.
+- **Network & Security Primitives:** Plan 9 manages TLS via `/net/tls` (`vpn_pushtls`) for HTTP authentication, and native UDP (`dial("udp!host!port", ...)` for binary tunnel connections.
 
 ---
 
@@ -40,71 +40,66 @@ struct VpnDriver {
 
 ---
 
-## 3. Fortinet SSL-VPN Protocol Protocol Flow
+## 3. Fortinet SSL-VPN Protocol Protocol Flow (UDP Mode)
 
 ```
-[ vpnfs ]                              [ FortiGate Gateway ]
-    |                                            |
-    |--- TCP Dial & TLS Upgrade (port 443) ----->|
-    |                                            |
-    |--- HTTP POST /remote/logincheck ---------->|
-    |    (username, credential, realm)           |
-    |<-- HTTP 200 OK + SVPNCOOKIE ---------------|
-    |                                            |
-    |--- TCP Dial & TLS Upgrade (Tunnel) ------->|
-    |--- HTTP GET /remote/sslvpn-tunnel -------->|
-    |    (Cookie: SVPNCOOKIE=...)                |
-    |                                            |
-    |<====== 12-byte Encapsulated Binary =======>|
-    |        IP/PPP Packet Stream                |
+[ vpnfs ]                                      [ FortiGate Gateway ]
+    |                                                    |
+    |--- TCP Dial & TLS Upgrade (port 10443) ----------->|
+    |--- HTTP POST /remote/logincheck ------------------>|
+    |    (username, credential, token/2FA)               |
+    |<-- HTTP 200 OK + SVPNCOOKIE -----------------------|
+    |                                                    |
+    |--- Plan 9 UDP Dial (udp!host!10443) -------------->|
+    |--- UDP clthello Handshake ------------------------>|
+    |    [2-byte len] "GFtype\0clthello\0SVPNCOOKIE\0"   |
+    |                 + cookie_val + "\0"                |
+    |                                                    |
+    |<-- UDP svrhello Handshake ("ok") ------------------|
+    |                                                    |
+    |<================ UDP Datagram ====================>|
+    |              IP/PPP Packet Stream                  |
 ```
 
 ---
 
-## 4. Fortinet 12-Byte Packet Framing Specification
+## 4. UDP `clthello` Handshake Layout
 
-When elevated to tunnel mode (`/remote/sslvpn-tunnel`), all IP/PPP packets exchanged over the TLS stream are encapsulated with a 12-byte header:
+The Fortinet UDP tunnel connection begins by sending a `clthello` packet:
 
 ```
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Magic 1 ('P' = 0x50)        |   Magic 2 ('A' = 0x41)        |
+|          Big-Endian Payload Length (2 Bytes)                  |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       Total Frame Length (16-bit Big-Endian uint)             |
+|   'G'   |   'F'   |   't'   |   'y'   |   'p'   |   'e'   |\0 |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Control/Flags (0x01 = Data)   |       Reserved (0x00)         |
+|   'c'   |   'l'   |   't'   |   'h'   |   'e'   |   'l'   |...|
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Reserved (0x00)                         |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                        IP / PPP Payload                       |
-|                                                               |
+|  "clthello\0"  | "SVPNCOOKIE\0" |  <cookie_value>        | \0 |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-### Framing Fields:
-1. **Magic Bytes (0..1):** `0x50` (`'P'`), `0x41` (`'A'`).
-2. **Total Frame Length (2..3):** Big-endian uint16 representing `12 + payload_len`.
-3. **Flags / Reserved (4..11):** Control flag (e.g. `0x01` for data frame) followed by zeroed padding.
+Once the gateway accepts the cookie, it returns `svrhello` containing `"GFtype\0svrhello\0handshake\0ok\0"`, after which raw UDP datagrams are exchanged between the client and gateway.
 
 ---
 
 ## 5. Plan 9 Network Integration
 
-Packets received from the tunnel are un-framed and written to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
+Packets read from the UDP socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
 
 ```
 +---------------+     write_packet     +---------------+
 |               |  ----------------->  |               |
-| Plan 9 /pipe  |                      |    vpnfs      | ===> TLS Tunnel
+| Plan 9 /pipe  |                      |    vpnfs      | ===> UDP Socket
 |   (ip/ppp)    |  <-----------------  |               |
 +---------------+      read_packet     +---------------+
 ```
 
 ---
 
-## 6. Building `vpnfs`
+## 6. Building & Running `vpnfs`
 
 On 9front (Plan 9):
 
@@ -112,6 +107,6 @@ On 9front (Plan 9):
 # Compile vpnfs
 mk
 
-# Run vpnfs
-vpnfs -v -h vpn.example.com -p 443 -u username -P password
+# Run vpnfs (interactive token 2FA supported)
+vpnfs -v -h remote.almavivadobrasil.com.br -p 10443 -u username -P password
 ```
