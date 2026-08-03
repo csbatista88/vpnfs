@@ -20,6 +20,7 @@ struct VpnConfig {
 	char *user;
 	char *pass;
 	char *realm;
+	char *token;
 	int  verbose;
 };
 

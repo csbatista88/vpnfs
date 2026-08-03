@@ -73,6 +73,8 @@ fortinet_auth(VpnSession *s)
 	char body[512];
 	char resp[4096];
 	char *cookie_val;
+	char *token_str;
+	char *allocated_token;
 
 	if(s->cfg->user == nil || s->cfg->pass == nil){
 		fprint(2, "vpnfs: fortinet_auth missing username or password\n");
@@ -109,6 +111,61 @@ fortinet_auth(VpnSession *s)
 	}
 
 	cookie_val = extract_cookie(resp, "SVPNCOOKIE");
+
+	/* Check if 2FA / FortiToken is required */
+	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil || strstr(resp, "2fa") != nil){
+		if(cookie_val != nil){
+			free(cookie_val);
+			cookie_val = nil;
+		}
+
+		if(s->cfg->verbose)
+			print("vpnfs: 2FA challenge detected (tokeninfo/no cookie)\n");
+
+		allocated_token = nil;
+		if(s->cfg->token != nil && *s->cfg->token != '\0'){
+			token_str = s->cfg->token;
+		}else{
+			allocated_token = readcons("FortiToken Code: ", nil, 1);
+			if(allocated_token == nil){
+				fprint(2, "vpnfs: failed to read token code\n");
+				return -1;
+			}
+			token_str = allocated_token;
+		}
+
+		if(s->cfg->realm != nil && *s->cfg->realm != '\0')
+			snprint(body, sizeof(body), "username=%s&credential=%s&realm=%s&code=%s&ajax=1",
+				s->cfg->user, s->cfg->pass, s->cfg->realm, token_str);
+		else
+			snprint(body, sizeof(body), "username=%s&credential=%s&code=%s&ajax=1",
+				s->cfg->user, s->cfg->pass, token_str);
+
+		if(allocated_token != nil)
+			free(allocated_token);
+
+		if(s->cfg->verbose)
+			print("vpnfs: sending 2FA token verification to /remote/logincheck...\n");
+
+		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+		if(raw_fd < 0)
+			return -1;
+
+		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+		if(tls_fd < 0)
+			return -1;
+
+		n = vpn_http_post(tls_fd, s->cfg->host, "remote/logincheck", body, resp, sizeof(resp));
+		close(tls_fd);
+
+		if(n <= 0){
+			fprint(2, "vpnfs: fortinet_auth failed to receive 2FA HTTP response\n");
+			return -1;
+		}
+
+		cookie_val = extract_cookie(resp, "SVPNCOOKIE");
+	}
+
 	if(cookie_val == nil){
 		fprint(2, "vpnfs: SVPNCOOKIE not found in login response\n");
 		if(s->cfg->verbose)

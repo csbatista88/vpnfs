@@ -22,7 +22,7 @@ vpn_driver_lookup(char *name)
 void
 usage(void)
 {
-	fprint(2, "usage: vpnfs [-v] [-d driver] -h host [-p port] -u user -P pass [-r realm]\n");
+	fprint(2, "usage: vpnfs [-v] [-d driver] -h host [-p port] -u user -P pass [-r realm] [-t token]\n");
 	exits("usage");
 }
 
@@ -59,6 +59,9 @@ main(int argc, char *argv[])
 		break;
 	case 'r':
 		cfg.realm = EARGF(usage());
+		break;
+	case 't':
+		cfg.token = EARGF(usage());
 		break;
 	case 'v':
 		cfg.verbose = 1;
