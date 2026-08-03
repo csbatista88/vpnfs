@@ -53,6 +53,30 @@ extract_cookie(char *resp, char *cookie_name)
 	return val;
 }
 
+static char*
+prompt_token(char *prompt, char *buf, int buflen)
+{
+	int fd, n;
+
+	print("%s", prompt);
+	fd = open("/dev/cons", OREAD);
+	if(fd < 0)
+		return nil;
+
+	n = read(fd, buf, buflen - 1);
+	close(fd);
+
+	if(n <= 0)
+		return nil;
+
+	buf[n] = '\0';
+	while(n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')){
+		buf[n-1] = '\0';
+		n--;
+	}
+	return buf;
+}
+
 static int
 fortinet_init(VpnSession *s)
 {
@@ -76,6 +100,7 @@ fortinet_auth(VpnSession *s)
 	char resp[4096];
 	char *cookie_val;
 	char *token_str;
+	char token_buf[128];
 
 	if(s->cfg->user == nil || s->cfg->pass == nil){
 		fprint(2, "vpnfs: fortinet_auth missing username or password\n");
@@ -115,9 +140,6 @@ fortinet_auth(VpnSession *s)
 
 	/* Check if 2FA / FortiToken is required */
 	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil || strstr(resp, "2fa") != nil){
-		char token_buf[128];
-		char *token_input;
-
 		if(cookie_val != nil){
 			free(cookie_val);
 			cookie_val = nil;
@@ -129,12 +151,10 @@ fortinet_auth(VpnSession *s)
 		if(s->cfg->token != nil && *s->cfg->token != '\0'){
 			token_str = s->cfg->token;
 		}else{
-			token_input = readpass("FortiToken Code: ");
-			if(token_input == nil){
-				fprint(2, "vpnfs: failed to read token code\n");
+			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
+				fprint(2, "vpnfs: failed to read token code from console\n");
 				return -1;
 			}
-			utflcpy(token_buf, token_input, sizeof(token_buf));
 			token_str = token_buf;
 		}
 
@@ -179,6 +199,33 @@ fortinet_auth(VpnSession *s)
 
 	if(s->cfg->verbose)
 		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
+
+	/* Fetch /remote/fortisslvpn_xml to validate/activate session on FortiOS */
+	if(s->cfg->verbose)
+		print("vpnfs: fetching /remote/fortisslvpn_xml...\n");
+
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd >= 0){
+		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+		if(tls_fd >= 0){
+			char req[512];
+			int reqlen;
+
+			reqlen = snprint(req, sizeof(req),
+				"GET /remote/fortisslvpn_xml HTTP/1.1\r\n"
+				"Host: %s\r\n"
+				"User-Agent: Mozilla/5.0 SV1\r\n"
+				"Cookie: %s\r\n"
+				"Connection: close\r\n"
+				"\r\n",
+				s->cfg->host, s->cookie);
+
+			write(tls_fd, req, reqlen);
+			while(read(tls_fd, resp, sizeof(resp)) > 0)
+				;
+			close(tls_fd);
+		}
+	}
 
 	return 0;
 }
