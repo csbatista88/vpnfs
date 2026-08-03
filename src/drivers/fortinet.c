@@ -1,5 +1,7 @@
 #include <u.h>
 #include <libc.h>
+#include <mp.h>
+#include <libsec.h>
 #include "../vpnfs.h"
 
 typedef struct FortinetPriv FortinetPriv;
@@ -74,7 +76,6 @@ fortinet_auth(VpnSession *s)
 	char resp[4096];
 	char *cookie_val;
 	char *token_str;
-	char *allocated_token;
 
 	if(s->cfg->user == nil || s->cfg->pass == nil){
 		fprint(2, "vpnfs: fortinet_auth missing username or password\n");
@@ -114,6 +115,9 @@ fortinet_auth(VpnSession *s)
 
 	/* Check if 2FA / FortiToken is required */
 	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil || strstr(resp, "2fa") != nil){
+		char token_buf[128];
+		char *token_input;
+
 		if(cookie_val != nil){
 			free(cookie_val);
 			cookie_val = nil;
@@ -122,16 +126,16 @@ fortinet_auth(VpnSession *s)
 		if(s->cfg->verbose)
 			print("vpnfs: 2FA challenge detected (tokeninfo/no cookie)\n");
 
-		allocated_token = nil;
 		if(s->cfg->token != nil && *s->cfg->token != '\0'){
 			token_str = s->cfg->token;
 		}else{
-			allocated_token = readcons("FortiToken Code: ", nil, 1);
-			if(allocated_token == nil){
+			token_input = readpass("FortiToken Code: ");
+			if(token_input == nil){
 				fprint(2, "vpnfs: failed to read token code\n");
 				return -1;
 			}
-			token_str = allocated_token;
+			utflcpy(token_buf, token_input, sizeof(token_buf));
+			token_str = token_buf;
 		}
 
 		if(s->cfg->realm != nil && *s->cfg->realm != '\0')
@@ -140,9 +144,6 @@ fortinet_auth(VpnSession *s)
 		else
 			snprint(body, sizeof(body), "username=%s&credential=%s&code=%s&ajax=1",
 				s->cfg->user, s->cfg->pass, token_str);
-
-		if(allocated_token != nil)
-			free(allocated_token);
 
 		if(s->cfg->verbose)
 			print("vpnfs: sending 2FA token verification to /remote/logincheck...\n");
