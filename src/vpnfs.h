@@ -1,5 +1,5 @@
-#include <u.h>
-#include <libc.h>
+#ifndef VPNFS_H
+#define VPNFS_H
 
 /* Fortinet framing header definitions */
 #define FORTINET_HDR_MAGIC1  0x50 /* 'P' */
@@ -55,3 +55,5 @@ int  vpn_create_pipes(VpnSession *s);
 
 /* Driver declarations */
 extern VpnDriver fortinet_driver;
+
+#endif
