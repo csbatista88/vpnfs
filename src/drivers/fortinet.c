@@ -245,7 +245,7 @@ fortinet_connect_tunnel(VpnSession *s)
 	if(tls_fd < 0)
 		return -1;
 
-	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cookie) < 0){
+	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cfg->port, s->cookie) < 0){
 		close(tls_fd);
 		return -1;
 	}

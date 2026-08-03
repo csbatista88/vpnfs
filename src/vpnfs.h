@@ -51,7 +51,7 @@ VpnDriver *vpn_driver_lookup(char *name);
 int  vpn_dial(char *host, char *port);
 int  vpn_pushtls(int fd, char *host);
 int  vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxresp);
-int  vpn_http_get_tunnel(int fd, char *host, char *cookie);
+int  vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie);
 int  vpn_create_pipes(VpnSession *s);
 
 /* Driver declarations */
