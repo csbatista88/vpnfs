@@ -52,6 +52,39 @@ extract_cookie(char *resp, char *cookie_name)
 }
 
 static int
+discard_http_headers(int fd)
+{
+	char c;
+	int n, state;
+
+	state = 0;
+	while(state < 4){
+		n = read(fd, &c, 1);
+		if(n <= 0)
+			return -1;
+
+		if(c == '\r'){
+			if(state == 0 || state == 2)
+				state++;
+			else
+				state = 1;
+		}else if(c == '\n'){
+			if(state == 1 || state == 3)
+				state++;
+			else if(state == 0)
+				state = 2;
+			else if(state == 2)
+				state = 4;
+			else
+				state = 0;
+		}else{
+			state = 0;
+		}
+	}
+	return 0;
+}
+
+static int
 fortinet_init(VpnSession *s)
 {
 	FortinetPriv *priv;
@@ -147,6 +180,12 @@ fortinet_connect_tunnel(VpnSession *s)
 		return -1;
 
 	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cookie) < 0){
+		close(tls_fd);
+		return -1;
+	}
+
+	if(discard_http_headers(tls_fd) < 0){
+		fprint(2, "vpnfs: failed to read HTTP response headers from tunnel\n");
 		close(tls_fd);
 		return -1;
 	}
