@@ -2,12 +2,18 @@
 
 TARG=vpnfs
 OFILES=\
-	src/main.$O\
-	src/net_plan9.$O\
-	src/drivers/fortinet.$O\
+	main.$O\
+	net_plan9.$O\
+	fortinet.$O\
 
 HFILES=\
 	src/vpnfs.h\
+
+%.$O: src/%.c
+	$CC $CFLAGS src/$stem.c
+
+%.$O: src/drivers/%.c
+	$CC $CFLAGS src/drivers/$stem.c
 
 BIN=/$objtype/bin
 
