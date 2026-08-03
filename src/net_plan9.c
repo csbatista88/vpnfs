@@ -39,7 +39,11 @@ vpn_pushtls(int fd, char *host)
 	/* tlsClient lida com o handshake SSL/TLS completo e retorna o novo fd seguro */
 	tlsfd = tlsClient(fd, conn);
 	
-	/* A struct TLSconn pode ser liberada após o handshake; o fd permanece ativo */
+	/* A struct TLSconn e seus campos alocados podem ser liberados após o handshake */
+	if(conn->cert != nil)
+		free(conn->cert);
+	if(conn->sessionID != nil)
+		free(conn->sessionID);
 	free(conn);
 
 	if(tlsfd < 0){
@@ -54,10 +58,16 @@ int
 vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxresp)
 {
 	char req[1024];
+	char formatted_path[256];
 	int reqlen, n, total;
 
+	if(path[0] == '/')
+		snprint(formatted_path, sizeof(formatted_path), "%s", path);
+	else
+		snprint(formatted_path, sizeof(formatted_path), "/%s", path);
+
 	reqlen = snprint(req, sizeof(req),
-		"POST /%s HTTP/1.1\r\n"
+		"POST %s HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
 		"Accept: */*\r\n"
@@ -66,7 +76,7 @@ vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxres
 		"Connection: close\r\n"
 		"\r\n"
 		"%s",
-		path, host, (int)strlen(body), body);
+		formatted_path, host, (int)strlen(body), body);
 
 	if(write(fd, req, reqlen) != reqlen){
 		fprint(2, "vpnfs: http post write failed: %r\n");
@@ -89,7 +99,8 @@ int
 vpn_http_get_tunnel(int fd, char *host, char *cookie)
 {
 	char req[1024];
-	int reqlen;
+	char c;
+	int reqlen, state;
 
 	reqlen = snprint(req, sizeof(req),
 		"GET /remote/sslvpn-tunnel HTTP/1.1\r\n"
@@ -104,7 +115,21 @@ vpn_http_get_tunnel(int fd, char *host, char *cookie)
 		fprint(2, "vpnfs: sslvpn-tunnel request failed: %r\n");
 		return -1;
 	}
-	return 0;
+
+	/* Drain HTTP response header byte-by-byte until \r\n\r\n */
+	state = 0;
+	while(read(fd, &c, 1) == 1){
+		switch(state){
+		case 0: if(c == '\r') state = 1; else if(c == '\n') state = 2; break;
+		case 1: if(c == '\n') state = 2; else if(c == '\r') state = 1; else state = 0; break;
+		case 2: if(c == '\r') state = 3; else state = 0; break;
+		case 3: if(c == '\n') return 0; /* Header fully drained, socket positioned at binary stream */
+			else if(c == '\r') state = 1; else state = 0; break;
+		}
+	}
+
+	fprint(2, "vpnfs: unexpected EOF reading tunnel upgrade response\n");
+	return -1;
 }
 
 int
