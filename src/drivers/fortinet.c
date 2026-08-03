@@ -39,9 +39,9 @@ extract_cookie(char *resp, char *cookie_name)
 	if(*p == '=')
 		p++;
 
-	/* Find delimiter: ';' or '\r' or '\n' or '\0' */
+	/* Find delimiter: ';', '\r', '\n', '&', '"', ' ', '\0' */
 	end = p;
-	while(*end && *end != ';' && *end != '\r' && *end != '\n')
+	while(*end && *end != ';' && *end != '\r' && *end != '\n' && *end != '&' && *end != '"' && *end != ' ')
 		end++;
 
 	val = malloc(end - p + 1);
@@ -143,6 +143,8 @@ fortinet_auth(VpnSession *s)
 
 	/* Check if 2FA / FortiToken is required */
 	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil || strstr(resp, "2fa") != nil){
+		char *magic_val;
+
 		if(cookie_val != nil){
 			free(cookie_val);
 			cookie_val = nil;
@@ -151,22 +153,38 @@ fortinet_auth(VpnSession *s)
 		if(s->cfg->verbose)
 			print("vpnfs: 2FA challenge detected (tokeninfo/no cookie)\n");
 
+		magic_val = extract_cookie(resp, "magic");
+
 		if(s->cfg->token != nil && *s->cfg->token != '\0'){
 			token_str = s->cfg->token;
 		}else{
 			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
+				if(magic_val != nil)
+					free(magic_val);
 				fprint(2, "vpnfs: failed to read token code from console\n");
 				return -1;
 			}
 			token_str = token_buf;
 		}
 
-		if(s->cfg->realm != nil && *s->cfg->realm != '\0')
-			snprint(body, sizeof(body), "username=%s&credential=%s&realm=%s&code=%s&ajax=1",
-				s->cfg->user, s->cfg->pass, s->cfg->realm, token_str);
-		else
-			snprint(body, sizeof(body), "username=%s&credential=%s&code=%s&ajax=1",
-				s->cfg->user, s->cfg->pass, token_str);
+		if(s->cfg->realm != nil && *s->cfg->realm != '\0'){
+			if(magic_val != nil)
+				snprint(body, sizeof(body), "username=%s&credential=%s&realm=%s&code=%s&magic=%s&ajax=1",
+					s->cfg->user, s->cfg->pass, s->cfg->realm, token_str, magic_val);
+			else
+				snprint(body, sizeof(body), "username=%s&credential=%s&realm=%s&code=%s&ajax=1",
+					s->cfg->user, s->cfg->pass, s->cfg->realm, token_str);
+		}else{
+			if(magic_val != nil)
+				snprint(body, sizeof(body), "username=%s&credential=%s&code=%s&magic=%s&ajax=1",
+					s->cfg->user, s->cfg->pass, token_str, magic_val);
+			else
+				snprint(body, sizeof(body), "username=%s&credential=%s&code=%s&ajax=1",
+					s->cfg->user, s->cfg->pass, token_str);
+		}
+
+		if(magic_val != nil)
+			free(magic_val);
 
 		if(s->cfg->verbose)
 			print("vpnfs: sending 2FA token verification to /remote/logincheck...\n");
