@@ -109,8 +109,8 @@ vpn_http_get_tunnel(int fd, char *host, char *cookie)
 		"GET /remote/sslvpn-tunnel HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
-		"Cookie: %s\r\n"
 		"Accept: */*\r\n"
+		"Cookie: %s\r\n"
 		"Connection: keep-alive\r\n"
 		"\r\n",
 		host, cookie);
