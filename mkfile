@@ -9,6 +9,9 @@ OFILES=\
 HFILES=\
 	src/vpnfs.h\
 
+$TARG: $OFILES
+	$LD $LDFLAGS -o $target $OFILES
+
 %.$O: src/%.c
 	$CC $CFLAGS src/$stem.c
 

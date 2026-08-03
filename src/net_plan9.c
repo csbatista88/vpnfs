@@ -1,5 +1,7 @@
 #include <u.h>
 #include <libc.h>
+#include <mp.h>
+#include <libsec.h>
 #include "vpnfs.h"
 
 int
@@ -23,47 +25,21 @@ vpn_dial(char *host, char *port)
 int
 vpn_pushtls(int fd, char *host)
 {
-	int tlsfd, ctlfd;
-	char buf[128];
-	char dname[64];
-	int n;
+	TLSconn *conn;
+	int tlsfd;
 
-	USED(host);
-
-	/* Try native libc pushtls first if available, or manual /net/tls/clone */
-	ctlfd = open("/net/tls/clone", ORDWR|OCEXEC);
-	if(ctlfd < 0){
-		/* Fall back or report error */
-		fprint(2, "vpnfs: opening /net/tls/clone failed: %r\n");
+	conn = (TLSconn*)mallocz(sizeof(TLSconn), 1);
+	if(conn == nil)
 		return -1;
-	}
 
-	n = read(ctlfd, buf, sizeof(buf)-1);
-	if(n <= 0){
-		close(ctlfd);
-		fprint(2, "vpnfs: reading /net/tls/clone failed: %r\n");
-		return -1;
-	}
-	buf[n] = '\0';
+	conn->serverName = host;
 
-	/* Pass existing socket to TLS stack */
-	if(fprint(ctlfd, "fd %d", fd) < 0){
-		close(ctlfd);
-		fprint(2, "vpnfs: tls ctl fd setup failed: %r\n");
-		return -1;
-	}
+	/* pushtls() na libc do 9front lida com o handshake TLS e retorna o novo fd seguro */
+	tlsfd = pushtls(fd, host, nil, conn);
+	free(conn);
+	if(tlsfd < 0)
+		werrstr("pushtls failed: %r");
 
-	snprint(dname, sizeof(dname), "/net/tls/%s/data", buf);
-	tlsfd = open(dname, ORDWR);
-	close(ctlfd);
-
-	if(tlsfd < 0){
-		fprint(2, "vpnfs: open %s failed: %r\n", dname);
-		return -1;
-	}
-
-	/* Plain socket fd is superseded by tlsfd */
-	close(fd);
 	return tlsfd;
 }
 
