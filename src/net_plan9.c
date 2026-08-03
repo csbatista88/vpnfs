@@ -99,25 +99,19 @@ int
 vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 {
 	char req[1024];
-	char host_buf[256];
 	int reqlen;
 
-	if(port != nil && *port != '\0' && strcmp(port, "443") != 0)
-		snprint(host_buf, sizeof(host_buf), "%s:%s", host, port);
-	else
-		snprint(host_buf, sizeof(host_buf), "%s", host);
+	USED(host);
+	USED(port);
 
 	reqlen = snprint(req, sizeof(req),
 		"GET /remote/sslvpn-tunnel HTTP/1.1\r\n"
-		"Host: %s\r\n"
+		"Host: sslvpn\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
-		"Accept: */*\r\n"
 		"Cookie: %s\r\n"
-		"Pragma: no-cache\r\n"
-		"Cache-Control: no-cache\r\n"
 		"Connection: keep-alive\r\n"
 		"\r\n",
-		host_buf, cookie);
+		cookie);
 
 	if(write(fd, req, reqlen) != reqlen){
 		fprint(2, "vpnfs: sslvpn-tunnel write failed: %r\n");

@@ -102,7 +102,7 @@ fortinet_auth(VpnSession *s)
 	char body[1024];
 	char resp[4096];
 	char req[512];
-	char *cookie_val;
+	char *cookie_val, *new_cookie;
 	char *token_str;
 	char token_buf[128];
 
@@ -123,7 +123,6 @@ fortinet_auth(VpnSession *s)
 
 	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
 	if(raw_fd < 0) return -1;
-
 	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
 	if(tls_fd < 0) return -1;
 
@@ -162,7 +161,6 @@ fortinet_auth(VpnSession *s)
 			token_str = token_buf;
 		}
 
-		/* Monta payload completo do 2FA parroting reqid, polid e magic */
 		snprint(body, sizeof(body),
 			"username=%s&credential=%s&code=%s&magic=%s&reqid=%s&polid=%s&ajax=1",
 			s->cfg->user, s->cfg->pass, token_str,
@@ -198,15 +196,14 @@ fortinet_auth(VpnSession *s)
 	if(s->cfg->verbose)
 		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
 
-	/* ALOCAÇÃO DE VPN OBRIGATÓRIA NO FORTINET (GET /remote/index e /remote/fortisslvpn) */
+	/* ALOCAÇÃO DE VPN E ATUALIZAÇÃO DO COOKIE (/remote/index & /remote/fortisslvpn) */
 	if(s->cfg->verbose)
-		print("vpnfs: requesting VPN session allocation (/remote/index & /remote/fortisslvpn)...\n");
+		print("vpnfs: requesting VPN session allocation...\n");
 
 	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
 	if(raw_fd >= 0){
 		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
 		if(tls_fd >= 0){
-			/* 1. GET /remote/index */
 			snprint(req, sizeof(req),
 				"GET /remote/index HTTP/1.1\r\n"
 				"Host: %s:%s\r\n"
@@ -215,8 +212,15 @@ fortinet_auth(VpnSession *s)
 				"Connection: close\r\n\r\n",
 				s->cfg->host, s->cfg->port, s->cookie);
 			write(tls_fd, req, strlen(req));
-			while(read(tls_fd, resp, sizeof(resp)) > 0);
+			memset(resp, 0, sizeof(resp));
+			read(tls_fd, resp, sizeof(resp) - 1);
 			close(tls_fd);
+
+			new_cookie = extract_cookie(resp, "SVPNCOOKIE");
+			if(new_cookie != nil){
+				snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", new_cookie);
+				free(new_cookie);
+			}
 		}
 	}
 
@@ -224,7 +228,6 @@ fortinet_auth(VpnSession *s)
 	if(raw_fd >= 0){
 		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
 		if(tls_fd >= 0){
-			/* 2. GET /remote/fortisslvpn */
 			snprint(req, sizeof(req),
 				"GET /remote/fortisslvpn HTTP/1.1\r\n"
 				"Host: %s:%s\r\n"
@@ -233,8 +236,15 @@ fortinet_auth(VpnSession *s)
 				"Connection: close\r\n\r\n",
 				s->cfg->host, s->cfg->port, s->cookie);
 			write(tls_fd, req, strlen(req));
-			while(read(tls_fd, resp, sizeof(resp)) > 0);
+			memset(resp, 0, sizeof(resp));
+			read(tls_fd, resp, sizeof(resp) - 1);
 			close(tls_fd);
+
+			new_cookie = extract_cookie(resp, "SVPNCOOKIE");
+			if(new_cookie != nil){
+				snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", new_cookie);
+				free(new_cookie);
+			}
 		}
 	}
 
