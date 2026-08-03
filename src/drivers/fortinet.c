@@ -262,20 +262,20 @@ static int
 fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 {
 	uchar hdr[FORTINET_HDR_LEN];
-	int payload_len, frame_len;
+	int payload_len, frame_len, i;
 
 	if(read_exact(s->tls_fd, hdr, FORTINET_HDR_LEN) < 0)
 		return -1;
 
-	/* Detecta recusa do servidor por erro HTTP */
-	if(hdr[0] == 'H' || hdr[0] == '1'){
-		fprint(2, "vpnfs: tunnel rejected by gateway (HTTP error / session timeout)\n");
-		return -1;
-	}
-
-	/* Verifica o Magic 'P' 'A' (0x50 0x41) */
+	/* Se os primeiros bytes nao forem 'P' 'A' (0x50 0x41), imprima o hex dump para diagnostico */
 	if(hdr[0] != FORTINET_HDR_MAGIC1 || hdr[1] != FORTINET_HDR_MAGIC2){
-		fprint(2, "vpnfs: invalid Fortinet header magic: 0x%02x 0x%02x\n", hdr[0], hdr[1]);
+		fprint(2, "vpnfs: invalid magic! raw header bytes:\n");
+		for(i = 0; i < FORTINET_HDR_LEN; i++)
+			fprint(2, " %02x", hdr[i]);
+		fprint(2, " | ASCII: ");
+		for(i = 0; i < FORTINET_HDR_LEN; i++)
+			fprint(2, "%c", (hdr[i] >= 32 && hdr[i] <= 126) ? hdr[i] : '.');
+		fprint(2, "\n");
 		return -1;
 	}
 
@@ -293,7 +293,7 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 	}
 
 	if(s->cfg->verbose)
-		print("vpnfs: rx packet len=%d (flags=0x%02x)\n", payload_len, hdr[4]);
+		print("vpnfs: rx frame_len=%d payload=%d (flags=0x%02x)\n", frame_len, payload_len, hdr[4]);
 
 	return payload_len;
 }

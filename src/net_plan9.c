@@ -99,8 +99,7 @@ int
 vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 {
 	char req[1024];
-	char c;
-	int reqlen, state;
+	int reqlen;
 
 	if(port != nil && *port != '\0' && strcmp(port, "443") != 0)
 		reqlen = snprint(req, sizeof(req),
@@ -124,24 +123,11 @@ vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 			host, cookie);
 
 	if(write(fd, req, reqlen) != reqlen){
-		fprint(2, "vpnfs: sslvpn-tunnel request failed: %r\n");
+		fprint(2, "vpnfs: sslvpn-tunnel write failed: %r\n");
 		return -1;
 	}
 
-	/* Consome a resposta HTTP ("HTTP/1.1 200 OK ... \r\n\r\n") byte a byte */
-	state = 0;
-	while(read(fd, &c, 1) == 1){
-		switch(state){
-		case 0: if(c == '\r') state = 1; else if(c == '\n') state = 2; break;
-		case 1: if(c == '\n') state = 2; else if(c == '\r') state = 1; else state = 0; break;
-		case 2: if(c == '\r') state = 3; else state = 0; break;
-		case 3: if(c == '\n') return 0; /* Cabeçalho HTTP limpo, socket pronto no stream binario */
-			else if(c == '\r') state = 1; else state = 0; break;
-		}
-	}
-
-	fprint(2, "vpnfs: unexpected EOF reading tunnel response\n");
-	return -1;
+	return 0;
 }
 
 int
