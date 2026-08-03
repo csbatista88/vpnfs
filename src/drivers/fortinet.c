@@ -221,33 +221,6 @@ fortinet_auth(VpnSession *s)
 	if(s->cfg->verbose)
 		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
 
-	/* Fetch /remote/fortisslvpn_xml to validate/activate session on FortiOS */
-	if(s->cfg->verbose)
-		print("vpnfs: fetching /remote/fortisslvpn_xml...\n");
-
-	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-	if(raw_fd >= 0){
-		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-		if(tls_fd >= 0){
-			char req[512];
-			int reqlen;
-
-			reqlen = snprint(req, sizeof(req),
-				"GET /remote/fortisslvpn_xml HTTP/1.1\r\n"
-				"Host: %s\r\n"
-				"User-Agent: Mozilla/5.0 SV1\r\n"
-				"Cookie: %s\r\n"
-				"Connection: close\r\n"
-				"\r\n",
-				s->cfg->host, s->cookie);
-
-			write(tls_fd, req, reqlen);
-			while(read(tls_fd, resp, sizeof(resp)) > 0)
-				;
-			close(tls_fd);
-		}
-	}
-
 	return 0;
 }
 
