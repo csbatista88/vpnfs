@@ -29,16 +29,23 @@ vpn_pushtls(int fd, char *host)
 	int tlsfd;
 
 	conn = (TLSconn*)mallocz(sizeof(TLSconn), 1);
-	if(conn == nil)
+	if(conn == nil){
+		werrstr("out of memory");
 		return -1;
+	}
 
 	conn->serverName = host;
 
-	/* pushtls() na libc do 9front lida com o handshake TLS e retorna o novo fd seguro */
-	tlsfd = pushtls(fd, host, nil, conn);
+	/* tlsClient lida com o handshake SSL/TLS completo e retorna o novo fd seguro */
+	tlsfd = tlsClient(fd, conn);
+	
+	/* A struct TLSconn pode ser liberada após o handshake; o fd permanece ativo */
 	free(conn);
-	if(tlsfd < 0)
-		werrstr("pushtls failed: %r");
+
+	if(tlsfd < 0){
+		werrstr("tlsClient handshake failed: %r");
+		return -1;
+	}
 
 	return tlsfd;
 }
