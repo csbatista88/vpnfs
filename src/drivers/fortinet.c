@@ -58,11 +58,14 @@ prompt_token(char *prompt, char *buf, int buflen)
 {
 	int fd, n;
 
-	print("%s", prompt);
+	/* Força o envio da string para o stdout (fd 1) sem esperar \n */
+	fprint(1, "%s", prompt);
+
 	fd = open("/dev/cons", OREAD);
 	if(fd < 0)
 		return nil;
 
+	memset(buf, 0, buflen);
 	n = read(fd, buf, buflen - 1);
 	close(fd);
 
@@ -70,7 +73,7 @@ prompt_token(char *prompt, char *buf, int buflen)
 		return nil;
 
 	buf[n] = '\0';
-	while(n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')){
+	while(n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')){
 		buf[n-1] = '\0';
 		n--;
 	}
@@ -272,6 +275,12 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 
 	if(read_exact(s->tls_fd, hdr, FORTINET_HDR_LEN) < 0)
 		return -1;
+
+	/* Se o primeiro byte for 'H' (0x48) ou '1' (0x31), o gateway recusou a conexão via HTTP */
+	if(hdr[0] == 'H' || hdr[0] == '1'){
+		fprint(2, "vpnfs: authentication or 2FA token rejected by gateway (HTTP error)\n");
+		return -1;
+	}
 
 	/* Verify Fortinet 12-byte header magic: 0x50 0x41 ('P', 'A') */
 	if(hdr[0] != FORTINET_HDR_MAGIC1 || hdr[1] != FORTINET_HDR_MAGIC2){
