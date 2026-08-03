@@ -99,14 +99,18 @@ int
 vpn_http_get_tunnel(int fd, char *host, char *cookie)
 {
 	char req[1024];
-	char c;
-	int reqlen, state;
+	int reqlen;
 
+	/*
+	 * O FortiGate aceita o upgrade para túnel binário sem responder cabeçalho HTTP 200.
+	 * Enviamos a requisição e deixamos o socket pronto para o loop de pacotes binários.
+	 */
 	reqlen = snprint(req, sizeof(req),
 		"GET /remote/sslvpn-tunnel HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
 		"Cookie: %s\r\n"
+		"Accept: */*\r\n"
 		"Connection: keep-alive\r\n"
 		"\r\n",
 		host, cookie);
@@ -116,20 +120,7 @@ vpn_http_get_tunnel(int fd, char *host, char *cookie)
 		return -1;
 	}
 
-	/* Drain HTTP response header byte-by-byte until \r\n\r\n */
-	state = 0;
-	while(read(fd, &c, 1) == 1){
-		switch(state){
-		case 0: if(c == '\r') state = 1; else if(c == '\n') state = 2; break;
-		case 1: if(c == '\n') state = 2; else if(c == '\r') state = 1; else state = 0; break;
-		case 2: if(c == '\r') state = 3; else state = 0; break;
-		case 3: if(c == '\n') return 0; /* Header fully drained, socket positioned at binary stream */
-			else if(c == '\r') state = 1; else state = 0; break;
-		}
-	}
-
-	fprint(2, "vpnfs: unexpected EOF reading tunnel upgrade response\n");
-	return -1;
+	return 0;
 }
 
 int
