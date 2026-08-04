@@ -112,10 +112,18 @@ fortinet_fetch_config(VpnSession *s)
 		print("vpnfs: fetching XML configuration via dedicated TLS connection...\n");
 
 	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-	if(raw_fd < 0) return -1;
+	if(raw_fd < 0){
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: warning: XML config dial failed (continuing tunnel setup)\n");
+		return 0;
+	}
 
 	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-	if(tls_fd < 0) return -1;
+	if(tls_fd < 0){
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: warning: XML config TLS setup failed (continuing tunnel setup)\n");
+		return 0;
+	}
 
 	snprint(req, sizeof(req),
 		"GET /remote/fortisslvpn_xml?dual_stack=1 HTTP/1.1\r\n"
@@ -127,7 +135,9 @@ fortinet_fetch_config(VpnSession *s)
 
 	if(write(tls_fd, req, strlen(req)) != strlen(req)){
 		close(tls_fd);
-		return -1;
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: warning: XML config request write failed\n");
+		return 0;
 	}
 
 	memset(resp, 0, sizeof(resp));
@@ -166,6 +176,13 @@ fortinet_fetch_config(VpnSession *s)
 
 	if(s->cfg->verbose){
 		print("vpnfs: XML config response (%d bytes):\n%s\n", total, resp);
+	}
+
+	/* Se a resposta indicar erro HTTP 408/403/404, apenas emite um aviso e prossegue */
+	if(strstr(resp, "408 Request Time-out") != nil || strstr(resp, "403 Forbidden") != nil || strstr(resp, "404 Not Found") != nil){
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: XML configuration endpoint not available (proceeding with tunnel)\n");
+		return 0;
 	}
 
 	ip = extract_xml_tag(resp, "assigned-addr", "ipv4");

@@ -156,5 +156,11 @@ vpn_create_pipes(VpnSession *s)
 
 	s->pipe_in = p1[0];   /* Application reads from p1[0] */
 	s->pipe_out = p2[1];  /* Application writes to p2[1] */
+
+	/* Publica a outra ponta do pipe de saida no /srv/vpnfs para manter a referencia ativa */
+	if(postfd("vpnfs", p2[0]) < 0){
+		fprint(2, "vpnfs: warning: postfd vpnfs failed: %r\n");
+	}
+
 	return 0;
 }
