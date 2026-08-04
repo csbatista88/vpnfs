@@ -119,11 +119,11 @@ fortinet_fetch_config(VpnSession *s)
 
 	snprint(req, sizeof(req),
 		"GET /remote/fortisslvpn_xml?dual_stack=1 HTTP/1.1\r\n"
-		"Host: %s:%s\r\n"
+		"Host: %s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
 		"Cookie: %s\r\n"
 		"Connection: close\r\n\r\n",
-		s->cfg->host, s->cfg->port, s->cookie);
+		s->cfg->host, s->cookie);
 
 	if(write(tls_fd, req, strlen(req)) != strlen(req)){
 		close(tls_fd);

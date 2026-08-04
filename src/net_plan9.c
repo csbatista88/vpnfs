@@ -125,17 +125,16 @@ vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 	char req[1024];
 	int reqlen;
 
-	USED(host);
 	USED(port);
 
 	reqlen = snprint(req, sizeof(req),
 		"GET /remote/sslvpn-tunnel HTTP/1.1\r\n"
-		"Host: sslvpn\r\n"
+		"Host: %s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
 		"Cookie: %s\r\n"
 		"Connection: keep-alive\r\n"
 		"\r\n",
-		cookie);
+		host, cookie);
 
 	if(write(fd, req, reqlen) != reqlen){
 		fprint(2, "vpnfs: sslvpn-tunnel write failed: %r\n");
