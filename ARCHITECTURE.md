@@ -13,7 +13,7 @@
   #include <libc.h>
   #include "vpnfs.h"
   ```
-- **Network & Security Primitives:** Plan 9 manages TLS via `/net/tls` (`vpn_pushtls`) for HTTP authentication, and native UDP (`dial("udp!host!port", ...)` for binary tunnel connections.
+- **Security & Networking:** TLS connections managed via `tlsClient()` (`vpn_pushtls`), network connections via `dial()`, and pipe I/O via `pipe()`.
 
 ---
 
@@ -40,7 +40,7 @@ struct VpnDriver {
 
 ---
 
-## 3. Fortinet SSL-VPN Protocol Protocol Flow (UDP Mode)
+## 3. Fortinet SSL-VPN Protocol Protocol Flow (TLS Reuse Mode)
 
 ```
 [ vpnfs ]                                      [ FortiGate Gateway ]
@@ -50,49 +50,36 @@ struct VpnDriver {
     |    (username, credential, token/2FA)               |
     |<-- HTTP 200 OK + SVPNCOOKIE -----------------------|
     |                                                    |
-    |--- Plan 9 UDP Dial (udp!host!10443) -------------->|
-    |--- UDP clthello Handshake ------------------------>|
-    |    [2-byte len] "GFtype\0clthello\0SVPNCOOKIE\0"   |
-    |                 + cookie_val + "\0"                |
+    | (Maintain Active TLS Socket)                       |
+    |--- HTTP GET /remote/fortisslvpn_xml?dual_stack=1 ->|
+    |<-- XML Config (<assigned-addr>, <dns>) ------------|
     |                                                    |
-    |<-- UDP svrhello Handshake ("ok") ------------------|
+    |--- HTTP GET /remote/sslvpn-tunnel ---------------->|
     |                                                    |
-    |<================ UDP Datagram ====================>|
+    |<================ TLS Stream Datagram =============>|
     |              IP/PPP Packet Stream                  |
 ```
 
 ---
 
-## 4. UDP `clthello` Handshake Layout
+## 4. XML Network Parameter Extraction
 
-The Fortinet UDP tunnel connection begins by sending a `clthello` packet:
+During `fortinet_fetch_config()`, `vpnfs` requests `/remote/fortisslvpn_xml?dual_stack=1` over the active TLS connection and extracts:
+- Virtual IPv4 address: `<assigned-addr ipv4="x.x.x.x"/>`
+- Primary DNS server: `<dns ip="y.y.y.y"/>`
 
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          Big-Endian Payload Length (2 Bytes)                  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   'G'   |   'F'   |   't'   |   'y'   |   'p'   |   'e'   |\0 |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   'c'   |   'l'   |   't'   |   'h'   |   'e'   |   'l'   |...|
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  "clthello\0"  | "SVPNCOOKIE\0" |  <cookie_value>        | \0 |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-Once the gateway accepts the cookie, it returns `svrhello` containing `"GFtype\0svrhello\0handshake\0ok\0"`, after which raw UDP datagrams are exchanged between the client and gateway.
+In verbose (`-v`) mode, the full XML response body is printed to console to aid in Plan 9 network configuration tuning.
 
 ---
 
 ## 5. Plan 9 Network Integration
 
-Packets read from the UDP socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
+Packets read from the TLS socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
 
 ```
 +---------------+     write_packet     +---------------+
 |               |  ----------------->  |               |
-| Plan 9 /pipe  |                      |    vpnfs      | ===> UDP Socket
+| Plan 9 /pipe  |                      |    vpnfs      | ===> TLS Socket
 |   (ip/ppp)    |  <-----------------  |               |
 +---------------+      read_packet     +---------------+
 ```
@@ -107,6 +94,6 @@ On 9front (Plan 9):
 # Compile vpnfs
 mk
 
-# Run vpnfs (interactive token 2FA supported)
+# Run vpnfs (interactive token 2FA & verbose XML dump supported)
 vpnfs -v -h remote.almavivadobrasil.com.br -p 10443 -u username -P password
 ```
