@@ -95,6 +95,19 @@ main(int argc, char *argv[])
 
 	print("vpnfs: tunnel active. ppp device: %s\n", session.ttyname);
 
+	/* Automatically spawn /bin/ppp daemon on the pseudoterminal slave device */
+	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
+	case -1:
+		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
+		break;
+	case 0:
+		if(cfg.verbose)
+			print("vpnfs: starting /bin/ppp -m 1400 %s...\n", session.ttyname);
+		execl("/bin/ppp", "ppp", "-m", "1400", session.ttyname, nil);
+		fprint(2, "vpnfs: exec /bin/ppp failed: %r\n");
+		exits("exec ppp failed");
+	}
+
 	/* Fork process for bi-directional I/O:
 	 * Parent: TLS -> Pipe Out (ptmx master)
 	 * Child:  Pipe In (ptmx master) -> TLS
