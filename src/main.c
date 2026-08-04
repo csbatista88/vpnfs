@@ -111,7 +111,9 @@ main(int argc, char *argv[])
 		exits(nil);
 	default:
 		/* Parent process: read packets from TLS tunnel and write to system pipe */
-		while((n = driver->read_packet(&session, buf, sizeof(buf))) > 0){
+		while((n = driver->read_packet(&session, buf, sizeof(buf))) >= 0){
+			if(n == 0)
+				continue; /* GFtype heartbeat / control packet skipped */
 			if(write(session.pipe_out, buf, n) != n)
 				break;
 		}

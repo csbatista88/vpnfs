@@ -13,7 +13,7 @@
   #include <libc.h>
   #include "vpnfs.h"
   ```
-- **Security & Networking:** TLS connections managed via `tlsClient()` (`vpn_pushtls`), network connections via `dial()`, and pipe I/O via `pipe()`.
+- **Security & Networking:** TLS connections managed via `tlsClient()` (`vpn_pushtls`), network connections via `dial()`, and pipe I/O exposed to `/srv/vpnfs` via `vpn_post_srv()`.
 
 ---
 
@@ -35,65 +35,52 @@ struct VpnDriver {
 
 ---
 
-## 3. Fortinet SSL-VPN Protocol Protocol Flow (Dedicated Connections)
+## 3. Protocol Flow & Framing Translation Layer
 
 ```
-[ vpnfs ]                                      [ FortiGate Gateway ]
-    |                                                    |
-    |--- 1. TCP Dial & TLS Upgrade (Auth) -------------->|
-    |--- HTTP POST /remote/logincheck ------------------>|
-    |    (username, credential, token/2FA)               |
-    |<-- HTTP 200 OK + SVPNCOOKIE -----------------------|
-    |    [Close Auth TLS Connection]                     |
-    |                                                    |
-    |--- 2. Ephemeral TCP Dial & TLS Upgrade (XML) ----->|
-    |--- HTTP GET /remote/fortisslvpn_xml?dual_stack=1 ->|
-    |    (Cookie: SVPNCOOKIE=..., Connection: close)     |
-    |<-- XML Config Body (<assigned-addr>, <dns>) -------|
-    |    [Close Ephemeral XML TLS Connection]            |
-    |                                                    |
-    |--- 3. Dedicated TCP Dial & TLS Upgrade (Tunnel) ->|
-    |--- HTTP GET /remote/sslvpn-tunnel ---------------->|
-    |                                                    |
-    |<================ TLS Stream Datagram =============>|
-    |              IP/PPP Packet Stream                  |
+[ FortiGate Gateway ]                       [ vpnfs ]                              [ Plan 9 ppp(8) Daemon ]
+         |                                      |                                             |
+         |<--- 1. TCP Dial & TLS (Port 10443) ->|                                             |
+         |<--- HTTP POST /remote/logincheck ----|                                             |
+         |---> HTTP 200 OK + SVPNCOOKIE --------|                                             |
+         |                                      |                                             |
+         |<--- HTTP GET /remote/fortisslvpn_xml |                                             |
+         |---> XML Config (Decoded via unchunk)-|                                             |
+         |     [Close Auth TLS Connection]      |                                             |
+         |                                      |                                             |
+         |<--- 2. Dedicated TCP Dial & TLS ---->|                                             |
+         |<--- HTTP GET /remote/sslvpn-tunnel --|                                             |
+         |                                      |                                             |
+         |<=== PPP Raw + 2-byte Length Header =>|                                             |
+         |     (Filter out GFtype heartbeats)   |<=== HDLC Async Frames (RFC 1662 + FCS) ====>|
+         |                                      |     read/write via /srv/vpnfs               |
 ```
 
 ---
 
-## 4. XML Network Parameter Extraction
+## 4. Key Components
 
-During `fortinet_fetch_config()`, `vpnfs` opens a dedicated, ephemeral TLS connection to query `/remote/fortisslvpn_xml?dual_stack=1` with `Connection: close`, preventing HTTP pipeline timeouts (`408`).
-Extracted fields saved to `FortinetPriv`:
-- Virtual IPv4 address: `<assigned-addr ipv4="x.x.x.x"/>`
-- Primary DNS server: `<dns ip="y.y.y.y"/>`
+### A. GFtype Heartbeat Filter
+Fortinet gateways periodically inject proprietary keepalive packets starting with `"GFtype\0heartbeat\0"`. `fortinet_read_packet()` intercepts and drops these packets (returning `0` to cause the `main.c` packet loop to `continue`), preventing HDLC CRC corruption in `ppp(8)`.
 
-In verbose (`-v`) mode, the full XML response body is printed to console.
+### B. RFC 1662 HDLC Framer / Unframer
+- **`ppp_hdlc_encode()`:** Translates Fortinet PPP Raw payloads into standard HDLC Async frames (`0x7E` flags, `0x7D` byte escaping, 16-bit FCS CRC) before writing to `/srv/vpnfs.out`.
+- **`ppp_hdlc_decode()`:** Un-escapes HDLC frames received from `/srv/vpnfs.in` and strips the FCS CRC to extract the PPP Raw payload before adding the 2-byte Big-Endian length header for TLS transmission.
 
----
-
-## 5. Plan 9 Network Integration
-
-Packets read from the TLS tunnel socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
-
-```
-+---------------+     write_packet     +---------------+
-|               |  ----------------->  |               |
-| Plan 9 /pipe  |                      |    vpnfs      | ===> TLS Socket
-|   (ip/ppp)    |  <-----------------  |               |
-+---------------+      read_packet     +---------------+
-```
+### C. Native `/srv` Posting
+`vpn_create_pipes()` posts `/srv/vpnfs.in`, `/srv/vpnfs.out`, and `/srv/vpnfs` using standard Plan 9 `create("/srv/<name>", OWRITE, 0666)` and `fprint(sfd, "%d", fd)`, enabling `ppp(8)` to attach directly to the tunnel.
 
 ---
 
-## 6. Building & Running `vpnfs`
-
-On 9front (Plan 9):
+## 5. Building & Running `vpnfs` on 9front
 
 ```sh
-# Compile vpnfs
+# 1. Compile vpnfs
 mk
 
-# Run vpnfs (interactive token 2FA & verbose XML dump supported)
-vpnfs -v -h remote.almavivadobrasil.com.br -p 10443 -u username -P password
+# 2. Start vpnfs in background
+vpnfs -v -h remote.almavivadobrasil.com.br -p 10443 -u csbatista -P password &
+
+# 3. Attach Plan 9 ppp(8) daemon
+ppp /srv/vpnfs.in /srv/vpnfs.out
 ```
