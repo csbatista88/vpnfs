@@ -95,15 +95,17 @@ main(int argc, char *argv[])
 
 	print("vpnfs: tunnel active. System pipes posted at /srv/vpnfs.in and /srv/vpnfs.out\n");
 
-	/* Automatically spawn /bin/ip/ppp daemon on the posted /srv/vpnfs pipes */
+	/* Automatically spawn /bin/ip/ppp daemon over stream I/O */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
 		break;
 	case 0:
+		dup(session.srv_in_fd, 0);  /* Redirect stdin to pipe_in (/srv/vpnfs.in reader) */
+		dup(session.srv_out_fd, 1); /* Redirect stdout to pipe_out (/srv/vpnfs.out writer) */
 		if(cfg.verbose)
-			print("vpnfs: starting /bin/ip/ppp -P -m 1400 /srv/vpnfs.in /srv/vpnfs.out...\n");
-		execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", "/srv/vpnfs.in", "/srv/vpnfs.out", nil);
+			print("vpnfs: starting /bin/ip/ppp -P -m 1400 on stream I/O...\n");
+		execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", nil);
 		fprint(2, "vpnfs: exec /bin/ip/ppp failed: %r\n");
 		exits("exec ppp failed");
 	}
