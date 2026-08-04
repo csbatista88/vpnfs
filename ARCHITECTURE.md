@@ -33,27 +33,26 @@ struct VpnDriver {
 };
 ```
 
-### Module Breakdown
-- `src/main.c`: CLI parsing (`ARGBEGIN`/`ARGEND`), session setup, and bi-directional worker process spawning via `rfork(RFPROC|RFMEM)`.
-- `src/net_plan9.c`: Low-level network primitives (`vpn_dial`, `vpn_pushtls`, HTTP request generators, and `vpn_create_pipes`).
-- `src/drivers/fortinet.c`: Implementation of the Fortinet SSL-VPN driver.
-
 ---
 
-## 3. Fortinet SSL-VPN Protocol Protocol Flow (TLS Reuse Mode)
+## 3. Fortinet SSL-VPN Protocol Protocol Flow (Dedicated Connections)
 
 ```
 [ vpnfs ]                                      [ FortiGate Gateway ]
     |                                                    |
-    |--- TCP Dial & TLS Upgrade (port 10443) ----------->|
+    |--- 1. TCP Dial & TLS Upgrade (Auth) -------------->|
     |--- HTTP POST /remote/logincheck ------------------>|
     |    (username, credential, token/2FA)               |
     |<-- HTTP 200 OK + SVPNCOOKIE -----------------------|
+    |    [Close Auth TLS Connection]                     |
     |                                                    |
-    | (Maintain Active TLS Socket)                       |
+    |--- 2. Ephemeral TCP Dial & TLS Upgrade (XML) ----->|
     |--- HTTP GET /remote/fortisslvpn_xml?dual_stack=1 ->|
-    |<-- XML Config (<assigned-addr>, <dns>) ------------|
+    |    (Cookie: SVPNCOOKIE=..., Connection: close)     |
+    |<-- XML Config Body (<assigned-addr>, <dns>) -------|
+    |    [Close Ephemeral XML TLS Connection]            |
     |                                                    |
+    |--- 3. Dedicated TCP Dial & TLS Upgrade (Tunnel) ->|
     |--- HTTP GET /remote/sslvpn-tunnel ---------------->|
     |                                                    |
     |<================ TLS Stream Datagram =============>|
@@ -64,17 +63,18 @@ struct VpnDriver {
 
 ## 4. XML Network Parameter Extraction
 
-During `fortinet_fetch_config()`, `vpnfs` requests `/remote/fortisslvpn_xml?dual_stack=1` over the active TLS connection and extracts:
+During `fortinet_fetch_config()`, `vpnfs` opens a dedicated, ephemeral TLS connection to query `/remote/fortisslvpn_xml?dual_stack=1` with `Connection: close`, preventing HTTP pipeline timeouts (`408`).
+Extracted fields saved to `FortinetPriv`:
 - Virtual IPv4 address: `<assigned-addr ipv4="x.x.x.x"/>`
 - Primary DNS server: `<dns ip="y.y.y.y"/>`
 
-In verbose (`-v`) mode, the full XML response body is printed to console to aid in Plan 9 network configuration tuning.
+In verbose (`-v`) mode, the full XML response body is printed to console.
 
 ---
 
 ## 5. Plan 9 Network Integration
 
-Packets read from the TLS socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
+Packets read from the TLS tunnel socket are forwarded to a Plan 9 `/pipe`. The pipe's endpoints interact with `ip/ppp` or `/net` stack drivers:
 
 ```
 +---------------+     write_packet     +---------------+

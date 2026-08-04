@@ -102,48 +102,47 @@ fortinet_fetch_config(VpnSession *s)
 	char req[512];
 	char resp[4096];
 	char *ip, *dns1;
-	int raw_fd, n;
+	int raw_fd, tls_fd, n, total;
 	FortinetPriv *priv = s->priv;
+
+	if(s->cookie[0] == '\0')
+		return -1;
+
+	if(s->cfg->verbose)
+		print("vpnfs: fetching XML configuration via dedicated TLS connection...\n");
+
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd < 0) return -1;
+
+	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+	if(tls_fd < 0) return -1;
 
 	snprint(req, sizeof(req),
 		"GET /remote/fortisslvpn_xml?dual_stack=1 HTTP/1.1\r\n"
 		"Host: %s:%s\r\n"
 		"User-Agent: Mozilla/5.0 SV1\r\n"
 		"Cookie: %s\r\n"
-		"Connection: keep-alive\r\n\r\n",
+		"Connection: close\r\n\r\n",
 		s->cfg->host, s->cfg->port, s->cookie);
 
-	if(s->tls_fd < 0 || write(s->tls_fd, req, strlen(req)) != strlen(req)){
-		/* Se o socket anterior foi fechado pelo servidor, re-conecta TLS */
-		if(s->tls_fd >= 0) close(s->tls_fd);
-		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-		if(raw_fd < 0) return -1;
-		s->tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-		if(s->tls_fd < 0) return -1;
-
-		if(write(s->tls_fd, req, strlen(req)) != strlen(req))
-			return -1;
+	if(write(tls_fd, req, strlen(req)) != strlen(req)){
+		close(tls_fd);
+		return -1;
 	}
 
 	memset(resp, 0, sizeof(resp));
-	n = read(s->tls_fd, resp, sizeof(resp) - 1);
-	if(n <= 0){
-		/* Se nao recebeu resposta, tenta reconectar uma vez */
-		close(s->tls_fd);
-		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-		if(raw_fd < 0) return -1;
-		s->tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-		if(s->tls_fd < 0) return -1;
-
-		if(write(s->tls_fd, req, strlen(req)) != strlen(req))
-			return -1;
-		memset(resp, 0, sizeof(resp));
-		n = read(s->tls_fd, resp, sizeof(resp) - 1);
-		if(n <= 0) return -1;
+	total = 0;
+	while(total < sizeof(resp) - 1){
+		n = read(tls_fd, resp + total, sizeof(resp) - 1 - total);
+		if(n <= 0)
+			break;
+		total += n;
 	}
+	resp[total] = '\0';
+	close(tls_fd);
 
 	if(s->cfg->verbose){
-		print("vpnfs: XML config response:\n%s\n", resp);
+		print("vpnfs: XML config response (%d bytes):\n%s\n", total, resp);
 	}
 
 	ip = extract_xml_tag(resp, "assigned-addr", "ipv4");
@@ -188,6 +187,9 @@ fortinet_auth(VpnSession *s)
 	if(tls_fd < 0) return -1;
 
 	n = vpn_http_post(tls_fd, s->cfg->host, "remote/logincheck", body, resp, sizeof(resp));
+	close(tls_fd);
+
+	if(n <= 0) return -1;
 
 	cookie_val = extract_cookie(resp, "SVPNCOOKIE");
 
@@ -200,7 +202,6 @@ fortinet_auth(VpnSession *s)
 
 		if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
 			free(magic_val); free(reqid_val); free(polid_val);
-			close(tls_fd);
 			return -1;
 		}
 		token_str = token_buf;
@@ -213,7 +214,6 @@ fortinet_auth(VpnSession *s)
 			polid_val ? polid_val : "");
 
 		free(magic_val); free(reqid_val); free(polid_val);
-		close(tls_fd);
 
 		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
 		if(raw_fd < 0) return -1;
@@ -221,13 +221,14 @@ fortinet_auth(VpnSession *s)
 		if(tls_fd < 0) return -1;
 
 		n = vpn_http_post(tls_fd, s->cfg->host, "remote/logincheck", body, resp, sizeof(resp));
-		if(n <= 0){ close(tls_fd); return -1; }
+		close(tls_fd);
+
+		if(n <= 0) return -1;
 
 		cookie_val = extract_cookie(resp, "SVPNCOOKIE");
 	}
 
 	if(cookie_val == nil){
-		close(tls_fd);
 		fprint(2, "vpnfs: SVPNCOOKIE not found\n");
 		return -1;
 	}
@@ -238,9 +239,7 @@ fortinet_auth(VpnSession *s)
 	if(s->cfg->verbose)
 		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
 
-	s->tls_fd = tls_fd; /* Armazena o socket TLS ativo mantendo a sessao viva */
-
-	/* Busca o XML de configuracao para extrair IP e DNS */
+	/* Busca o XML de configuracao em conexao TLS curta dedicada */
 	fortinet_fetch_config(s);
 
 	return 0;
@@ -249,16 +248,33 @@ fortinet_auth(VpnSession *s)
 static int
 fortinet_connect_tunnel(VpnSession *s)
 {
-	if(s->tls_fd < 0){
-		fprint(2, "vpnfs: no active TLS session\n");
+	int raw_fd, tls_fd;
+
+	if(s->cookie[0] == '\0'){
+		fprint(2, "vpnfs: no session cookie available for tunnel connection\n");
 		return -1;
 	}
 
 	if(s->cfg->verbose)
-		print("vpnfs: issuing sslvpn-tunnel upgrade on active TLS session...\n");
+		print("vpnfs: opening dedicated TLS connection for tunnel upgrade...\n");
 
-	if(vpn_http_get_tunnel(s->tls_fd, s->cfg->host, s->cfg->port, s->cookie) < 0)
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd < 0)
 		return -1;
+
+	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+	if(tls_fd < 0)
+		return -1;
+
+	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cfg->port, s->cookie) < 0){
+		close(tls_fd);
+		return -1;
+	}
+
+	s->tls_fd = tls_fd;
+
+	if(s->cfg->verbose)
+		print("vpnfs: sslvpn-tunnel upgrade issued on TLS fd %d\n", tls_fd);
 
 	return 0;
 }
