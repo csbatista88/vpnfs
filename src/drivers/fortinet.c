@@ -253,6 +253,59 @@ fortinet_init(VpnSession *s)
 }
 
 static int
+fortinet_activate_session(VpnSession *s)
+{
+	char req[512];
+	char resp[4096];
+	char *new_cookie;
+	int raw_fd, tls_fd, n, total;
+
+	if(s->cookie[0] == '\0')
+		return -1;
+
+	if(s->cfg->verbose)
+		print("vpnfs: activating session via GET /remote/fortisslvpn...\n");
+
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd < 0) return -1;
+
+	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+	if(tls_fd < 0) return -1;
+
+	snprint(req, sizeof(req),
+		"GET /remote/fortisslvpn HTTP/1.1\r\n"
+		"Host: %s\r\n"
+		"User-Agent: Mozilla/5.0 SV1\r\n"
+		"Cookie: %s\r\n"
+		"Connection: close\r\n\r\n",
+		s->cfg->host, s->cookie);
+
+	if(write(tls_fd, req, strlen(req)) != strlen(req)){
+		close(tls_fd);
+		return -1;
+	}
+
+	memset(resp, 0, sizeof(resp));
+	total = 0;
+	while(total < sizeof(resp) - 1){
+		n = read(tls_fd, resp + total, sizeof(resp) - 1 - total);
+		if(n <= 0)
+			break;
+		total += n;
+	}
+	resp[total] = '\0';
+	close(tls_fd);
+
+	new_cookie = extract_cookie(resp, "SVPNCOOKIE");
+	if(new_cookie != nil){
+		snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", new_cookie);
+		free(new_cookie);
+	}
+
+	return 0;
+}
+
+static int
 fortinet_fetch_config(VpnSession *s, int tls_fd)
 {
 	char req[512];
@@ -407,9 +460,12 @@ fortinet_auth(VpnSession *s)
 	if(s->cfg->verbose)
 		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
 
-	/* Busca o XML de configuracao na MESMA conexao TLS da autenticacao */
+	/* Tenta buscar o XML de configuracao na conexao autenticada */
 	fortinet_fetch_config(s, tls_fd);
 	close(tls_fd);
+
+	/* Ativa a sessao no FortiGate via /remote/fortisslvpn */
+	fortinet_activate_session(s);
 
 	return 0;
 }
@@ -457,6 +513,19 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 
 	if(readn(s->tls_fd, hdr, 2) != 2)
 		return -1;
+
+	/* Intercepta erro HTTP retornado pelo FortiGate no upgrade do tunel */
+	if(hdr[0] == 'H' && hdr[1] == 'T'){
+		char errbuf[1024];
+		int n;
+		errbuf[0] = 'H';
+		errbuf[1] = 'T';
+		n = read(s->tls_fd, errbuf + 2, sizeof(errbuf) - 3);
+		if(n > 0) errbuf[2 + n] = '\0';
+		else errbuf[2] = '\0';
+		fprint(2, "vpnfs: tunnel request rejected by FortiGate:\n%s\n", errbuf);
+		return -1;
+	}
 
 	len = (hdr[0] << 8) | hdr[1];
 
