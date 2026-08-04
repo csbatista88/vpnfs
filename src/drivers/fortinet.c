@@ -101,8 +101,8 @@ fortinet_fetch_config(VpnSession *s)
 {
 	char req[512];
 	char resp[4096];
-	char *ip, *dns1;
-	int raw_fd, tls_fd, n, total;
+	char *ip, *dns1, *hdr_end, *cl;
+	int raw_fd, tls_fd, n, total, content_len, header_len;
 	FortinetPriv *priv = s->priv;
 
 	if(s->cookie[0] == '\0')
@@ -132,11 +132,34 @@ fortinet_fetch_config(VpnSession *s)
 
 	memset(resp, 0, sizeof(resp));
 	total = 0;
+	content_len = -1;
+	header_len = -1;
+
 	while(total < sizeof(resp) - 1){
 		n = read(tls_fd, resp + total, sizeof(resp) - 1 - total);
 		if(n <= 0)
 			break;
 		total += n;
+		resp[total] = '\0';
+
+		if(header_len < 0){
+			hdr_end = strstr(resp, "\r\n\r\n");
+			if(hdr_end != nil){
+				header_len = (hdr_end - resp) + 4;
+				cl = cistrstr(resp, "content-length:");
+				if(cl != nil && cl < hdr_end){
+					cl += 15;
+					while(*cl == ' ' || *cl == '\t')
+						cl++;
+					content_len = atoi(cl);
+				}
+			}
+		}
+
+		if(header_len >= 0 && content_len >= 0){
+			if(total >= header_len + content_len)
+				break;
+		}
 	}
 	resp[total] = '\0';
 	close(tls_fd);
@@ -200,11 +223,15 @@ fortinet_auth(VpnSession *s)
 
 		if(cookie_val != nil){ free(cookie_val); cookie_val = nil; }
 
-		if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
-			free(magic_val); free(reqid_val); free(polid_val);
-			return -1;
+		if(s->cfg->token != nil && *s->cfg->token != '\0'){
+			token_str = s->cfg->token;
+		}else{
+			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
+				free(magic_val); free(reqid_val); free(polid_val);
+				return -1;
+			}
+			token_str = token_buf;
 		}
-		token_str = token_buf;
 
 		snprint(body, sizeof(body),
 			"username=%s&credential=%s&code=%s&magic=%s&reqid=%s&polid=%s&ajax=1",

@@ -38,7 +38,7 @@ vpn_pushtls(int fd, char *host)
 
 	/* tlsClient lida com o handshake SSL/TLS completo e retorna o novo fd seguro */
 	tlsfd = tlsClient(fd, conn);
-	
+
 	/* A struct TLSconn e seus campos alocados podem ser liberados após o handshake */
 	if(conn->cert != nil)
 		free(conn->cert);
@@ -59,7 +59,8 @@ vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxres
 {
 	char req[1024];
 	char formatted_path[256];
-	int reqlen, n, total;
+	int reqlen, n, total, content_len, header_len;
+	char *hdr_end, *cl;
 
 	if(path[0] == '/')
 		snprint(formatted_path, sizeof(formatted_path), "%s", path);
@@ -84,12 +85,35 @@ vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxres
 	}
 
 	total = 0;
+	content_len = -1;
+	header_len = -1;
 	memset(resp, 0, maxresp);
+
 	while(total < maxresp - 1){
 		n = read(fd, resp + total, maxresp - 1 - total);
 		if(n <= 0)
 			break;
 		total += n;
+		resp[total] = '\0';
+
+		if(header_len < 0){
+			hdr_end = strstr(resp, "\r\n\r\n");
+			if(hdr_end != nil){
+				header_len = (hdr_end - resp) + 4;
+				cl = cistrstr(resp, "content-length:");
+				if(cl != nil && cl < hdr_end){
+					cl += 15;
+					while(*cl == ' ' || *cl == '\t')
+						cl++;
+					content_len = atoi(cl);
+				}
+			}
+		}
+
+		if(header_len >= 0 && content_len >= 0){
+			if(total >= header_len + content_len)
+				break;
+		}
 	}
 	resp[total] = '\0';
 	return total;
