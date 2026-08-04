@@ -93,17 +93,17 @@ main(int argc, char *argv[])
 	if(driver->connect_tunnel(&session) < 0)
 		sysfatal("tunnel connection failed");
 
-	print("vpnfs: tunnel active. System pipe posted at %s\n", session.ttyname);
+	print("vpnfs: tunnel active. System pipes posted at /srv/vpnfs.in and /srv/vpnfs.out\n");
 
-	/* Automatically spawn /bin/ppp daemon on the posted /srv/vpnfs pipe */
+	/* Automatically spawn /bin/ppp daemon on the posted /srv/vpnfs pipes */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
 		break;
 	case 0:
 		if(cfg.verbose)
-			print("vpnfs: starting /bin/ppp -m 1400 %s...\n", session.ttyname);
-		execl("/bin/ppp", "ppp", "-m", "1400", session.ttyname, nil);
+			print("vpnfs: starting /bin/ppp -m 1400 /srv/vpnfs.in /srv/vpnfs.out...\n");
+		execl("/bin/ppp", "ppp", "-m", "1400", "/srv/vpnfs.in", "/srv/vpnfs.out", nil);
 		fprint(2, "vpnfs: exec /bin/ppp failed: %r\n");
 		exits("exec ppp failed");
 	}

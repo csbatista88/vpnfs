@@ -267,9 +267,13 @@ vpn_post_srv(char *name, int fd)
 	int sfd;
 
 	snprint(path, sizeof(path), "/srv/%s", name);
+	remove(path); /* Clean up stale posting if it exists */
+
 	sfd = create(path, OWRITE, 0666);
-	if(sfd < 0)
+	if(sfd < 0){
+		fprint(2, "vpnfs: create %s failed: %r\n", path);
 		return -1;
+	}
 
 	if(fprint(sfd, "%d", fd) < 0){
 		close(sfd);
@@ -283,19 +287,24 @@ vpn_post_srv(char *name, int fd)
 int
 vpn_create_pipes(VpnSession *s)
 {
-	int p[2];
+	int p1[2], p2[2];
 
-	if(pipe(p) < 0){
+	if(pipe(p1) < 0 || pipe(p2) < 0){
 		fprint(2, "vpnfs: pipe creation failed: %r\n");
 		return -1;
 	}
 
-	s->pipe_in = p[0];    /* Main process reads packets coming from ppp */
-	s->pipe_out = p[0];   /* Main process writes packets coming from TLS to ppp */
-	s->srv_in_fd = p[1];  /* Retain reference descriptor to p[1] */
-	s->srv_out_fd = -1;
+	s->pipe_in = p1[0];    /* Main process reads packets to send over tunnel */
+	s->srv_in_fd = p1[1];  /* Reference descriptor for /srv/vpnfs.in writer */
+
+	s->pipe_out = p2[1];   /* Main process writes packets received from tunnel */
+	s->srv_out_fd = p2[0]; /* Reference descriptor for /srv/vpnfs.out reader */
 
 	snprint(s->ttyname, sizeof(s->ttyname), "/srv/vpnfs");
 
-	return vpn_post_srv("vpnfs", p[1]);
+	if(vpn_post_srv("vpnfs.in", p1[1]) < 0) return -1;
+	if(vpn_post_srv("vpnfs.out", p2[0]) < 0) return -1;
+	if(vpn_post_srv("vpnfs", p2[0]) < 0) return -1;
+
+	return 0;
 }
