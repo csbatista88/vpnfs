@@ -271,26 +271,39 @@ static char*
 extract_xml_tag(char *xml, char *tag, char *attr)
 {
 	char search[128];
-	char *p, *end, *val;
+	char *p, *t, *e, *end, *val;
+	int n;
 
-	USED(tag);
-	snprint(search, sizeof(search), "%s=", attr);
-	p = strstr(xml, search);
-	if(p == nil) return nil;
+	snprint(search, sizeof(search), " %s=", attr);
+	n = strlen(search);
 
-	p += strlen(search);
-	if(*p == '\'' || *p == '"') p++;
+	for(p = xml; (p = strstr(p, search)) != nil; p += n){
+		/* volta ate o '<' da tag que contem o atributo */
+		for(t = p; t > xml && *t != '<'; t--)
+			;
+		if(t == xml || *t != '<')
+			continue;
+		t++;
+		if(strncmp(t, tag, strlen(tag)) != 0)
+			continue;
+		e = t + strlen(tag);
+		if(*e != ' ' && *e != '\t' && *e != '>')
+			continue;
 
-	end = p;
-	while(*end && *end != '\'' && *end != '"' && *end != ' ' && *end != '>')
-		end++;
-
-	val = malloc(end - p + 1);
-	if(val == nil) return nil;
-
-	memmove(val, p, end - p);
-	val[end - p] = '\0';
-	return val;
+		p += n;
+		if(*p == '\'' || *p == '"')
+			p++;
+		end = p;
+		while(*end != '\0' && *end != '\'' && *end != '"' && *end != ' ' && *end != '>')
+			end++;
+		val = malloc(end - p + 1);
+		if(val == nil)
+			return nil;
+		memmove(val, p, end - p);
+		val[end - p] = '\0';
+		return val;
+	}
+	return nil;
 }
 
 static char*
@@ -517,10 +530,6 @@ fortinet_fetch_config(VpnSession *s)
 		return -1;
 	}
 
-	/*
-	 * Try the plain XML endpoint first. Some FortiOS boxes dislike
-	 * dual_stack depending on configuration.
-	 */
 	n = vpn_http_request(tls_fd, s->cfg->host, s->cfg->port,
 	                     "GET", "/remote/fortisslvpn_xml",
 	                     nil, nil, s->cookie, resp, sizeof(resp));
@@ -612,11 +621,6 @@ fortinet_connect_tunnel(VpnSession *s)
 		return -1;
 	}
 
-	/*
-	 * Important: Fortinet expects the XML configuration request to be
-	 * performed as part of session setup. Skipping it can cause 403
-	 * on /remote/sslvpn-tunnel.
-	 */
 	if(fortinet_fetch_config(s) < 0){
 		fprint(2, "vpnfs: unable to fetch Fortinet XML configuration\n");
 		return -1;
@@ -688,8 +692,17 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 		return 0;
 	}
 
-	/* TRADUÇÃO: Encapsula o PPP Raw em quadro HDLC (RFC 1662) com FCS-16 para o ppp(8) do 9front */
-	return ppp_hdlc_encode(payload, len, buf, maxlen);
+	/* TRADUÇÃO: PPP cru -> HDLC assincrono p/ ppp(8), com addr/ctl FF 03 */
+	{
+		uchar frame[VPN_BUFSIZE];
+
+		if(len + 2 > (int)sizeof(frame))
+			return -1;
+		frame[0] = 0xFF;
+		frame[1] = 0x03;
+		memmove(frame + 2, payload, len);
+		return ppp_hdlc_encode(frame, len + 2, buf, maxlen);
+	}
 }
 
 static int
@@ -700,6 +713,14 @@ fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 	int rawlen;
 
 	rawlen = ppp_hdlc_decode(buf, len, payload, sizeof(payload));
+	if(rawlen <= 0)
+		return -1;
+
+	/* Fortinet usa PPP cru: tira addr/ctl FF 03 do HDLC, se presente */
+	if(rawlen >= 2 && payload[0] == 0xFF && payload[1] == 0x03){
+		memmove(payload, payload + 2, rawlen - 2);
+		rawlen -= 2;
+	}
 	if(rawlen <= 0)
 		return -1;
 

@@ -32,6 +32,7 @@ struct VpnSession {
 	int pipe_out;               /* Pipe FD to write packets to system */
 	int srv_in_fd;              /* Held descriptor for /srv/vpnfs.in */
 	int srv_out_fd;             /* Held descriptor for /srv/vpnfs.out */
+	char ttyname[64];           /* Path to /dev/ttyp... slave device */
 	char cookie[VPN_COOKIE_LEN];/* Session cookie e.g., SVPNCOOKIE */
 	void *priv;                 /* Driver private data pointer */
 };
