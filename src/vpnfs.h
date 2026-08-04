@@ -57,6 +57,7 @@ int  vpn_pushtls(int fd, char *host);
 int  vpn_http_request(int fd, char *host, char *port, char *method,
                       char *path, char *ctype, char *body, char *cookie,
                       char *resp, int maxresp);
+int  vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxresp);
 int  vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie);
 int  vpn_http_status(char *resp);
 char *vpn_urlencode(char *s);

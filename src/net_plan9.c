@@ -213,6 +213,15 @@ vpn_http_request(int fd, char *host, char *port, char *method,
 }
 
 /*
+ * Backward-compatible wrapper for POST requests.
+ */
+int
+vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxresp)
+{
+	return vpn_http_request(fd, host, nil, "POST", path, "application/x-www-form-urlencoded", body, nil, resp, maxresp);
+}
+
+/*
  * This request upgrades the TLS connection to the Fortinet PPP tunnel.
  * If successful, no normal HTTP response is received; PPP framing starts.
  */
