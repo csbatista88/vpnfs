@@ -238,7 +238,7 @@ fortinet_auth(VpnSession *s)
 		char *reqid_val = extract_cookie(resp, "reqid");
 		char *polid_val = extract_cookie(resp, "polid");
 
-		if(cookie_val != nil){ free(cookie_val); cookie_val = nil; }
+		if(cookie_val != nil) free(cookie_val);
 
 		if(s->cfg->token != nil && *s->cfg->token != '\0'){
 			token_str = s->cfg->token;

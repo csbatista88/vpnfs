@@ -144,6 +144,24 @@ vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 	return 0;
 }
 
+static int
+vpn_post_srv(char *name, int fd)
+{
+	char path[64];
+	int sfd;
+
+	snprint(path, sizeof(path), "/srv/%s", name);
+	sfd = create(path, OWRITE, 0666);
+	if(sfd < 0)
+		return -1;
+	if(fprint(sfd, "%d", fd) < 0){
+		close(sfd);
+		return -1;
+	}
+	close(sfd);
+	return 0;
+}
+
 int
 vpn_create_pipes(VpnSession *s)
 {
@@ -154,13 +172,15 @@ vpn_create_pipes(VpnSession *s)
 		return -1;
 	}
 
-	s->pipe_in = p1[0];   /* Application reads from p1[0] */
-	s->pipe_out = p2[1];  /* Application writes to p2[1] */
+	s->pipe_in = p1[0];    /* Main process reads packets to send over tunnel */
+	s->srv_in_fd = p1[1];  /* Reference descriptor for /srv/vpnfs.in writer */
 
-	/* Publica a outra ponta do pipe de saida no /srv/vpnfs para manter a referencia ativa */
-	if(postfd("vpnfs", p2[0]) < 0){
-		fprint(2, "vpnfs: warning: postfd vpnfs failed: %r\n");
-	}
+	s->pipe_out = p2[1];   /* Main process writes packets received from tunnel */
+	s->srv_out_fd = p2[0]; /* Reference descriptor for /srv/vpnfs.out reader */
+
+	vpn_post_srv("vpnfs.in", p1[1]);
+	vpn_post_srv("vpnfs.out", p2[0]);
+	vpn_post_srv("vpnfs", p2[0]);
 
 	return 0;
 }

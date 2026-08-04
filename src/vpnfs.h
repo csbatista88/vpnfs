@@ -30,6 +30,8 @@ struct VpnSession {
 	int tls_fd;                 /* TLS data socket file descriptor */
 	int pipe_in;                /* Pipe FD to read packets from system */
 	int pipe_out;               /* Pipe FD to write packets to system */
+	int srv_in_fd;              /* Held descriptor for /srv/vpnfs.in */
+	int srv_out_fd;             /* Held descriptor for /srv/vpnfs.out */
 	char cookie[VPN_COOKIE_LEN];/* Session cookie e.g., SVPNCOOKIE */
 	void *priv;                 /* Driver private data pointer */
 };
