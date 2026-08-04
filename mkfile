@@ -18,6 +18,9 @@ $TARG: $OFILES
 %.$O: src/drivers/%.c
 	$CC $CFLAGS src/drivers/$stem.c
 
+clean:
+	rm -f *.$O $TARG
+
 BIN=/$objtype/bin
 
 </sys/src/cmd/mkone

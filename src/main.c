@@ -93,9 +93,9 @@ main(int argc, char *argv[])
 	if(driver->connect_tunnel(&session) < 0)
 		sysfatal("tunnel connection failed");
 
-	print("vpnfs: tunnel active. ppp device: %s\n", session.ttyname);
+	print("vpnfs: tunnel active. System pipe posted at %s\n", session.ttyname);
 
-	/* Automatically spawn /bin/ppp daemon on the pseudoterminal slave device */
+	/* Automatically spawn /bin/ppp daemon on the posted /srv/vpnfs pipe */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
@@ -109,21 +109,21 @@ main(int argc, char *argv[])
 	}
 
 	/* Fork process for bi-directional I/O:
-	 * Parent: TLS -> Pipe Out (ptmx master)
-	 * Child:  Pipe In (ptmx master) -> TLS
+	 * Parent: TLS -> Pipe Out
+	 * Child:  Pipe In -> TLS
 	 */
 	switch(rfork(RFPROC|RFMEM)){
 	case -1:
 		sysfatal("rfork failed: %r");
 	case 0:
-		/* Child process: read packets from ptmx master and write to TLS tunnel */
+		/* Child process: read packets from system pipe and write to TLS tunnel */
 		while((n = read(session.pipe_in, buf, sizeof(buf))) > 0){
 			if(driver->write_packet(&session, buf, n) < 0)
 				break;
 		}
 		exits(nil);
 	default:
-		/* Parent process: read packets from TLS tunnel and write to ptmx master */
+		/* Parent process: read packets from TLS tunnel and write to system pipe */
 		while((n = driver->read_packet(&session, buf, sizeof(buf))) >= 0){
 			if(n == 0)
 				continue; /* GFtype heartbeat / control packet skipped */

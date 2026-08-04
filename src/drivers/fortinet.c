@@ -270,38 +270,41 @@ extract_field(char *resp, char *name)
 static char*
 extract_xml_tag(char *xml, char *tag, char *attr)
 {
-	char search[128];
-	char *p, *t, *e, *end, *val;
-	int n;
+	char tag_start[128], attr_start[128];
+	char *p, *e, *end, *val;
+	int tag_len, attr_len;
 
-	snprint(search, sizeof(search), " %s=", attr);
-	n = strlen(search);
+	snprint(tag_start, sizeof(tag_start), "<%s ", tag);
+	tag_len = strlen(tag_start);
 
-	for(p = xml; (p = strstr(p, search)) != nil; p += n){
-		/* volta ate o '<' da tag que contem o atributo */
-		for(t = p; t > xml && *t != '<'; t--)
-			;
-		if(t == xml || *t != '<')
-			continue;
-		t++;
-		if(strncmp(t, tag, strlen(tag)) != 0)
-			continue;
-		e = t + strlen(tag);
-		if(*e != ' ' && *e != '\t' && *e != '>')
-			continue;
+	snprint(attr_start, sizeof(attr_start), "%s=", attr);
+	attr_len = strlen(attr_start);
 
-		p += n;
-		if(*p == '\'' || *p == '"')
+	p = xml;
+	while((p = strstr(p, tag_start)) != nil){
+		e = strchr(p, '>');
+		if(e == nil)
+			break;
+
+		p += tag_len;
+		while(p < e){
+			if(strncmp(p, attr_start, attr_len) == 0){
+				p += attr_len;
+				if(*p == '\'' || *p == '"')
+					p++;
+				end = p;
+				while(end < e && *end != '\'' && *end != '"' && *end != ' ' && *end != '>')
+					end++;
+				val = malloc(end - p + 1);
+				if(val == nil)
+					return nil;
+				memmove(val, p, end - p);
+				val[end - p] = '\0';
+				return val;
+			}
 			p++;
-		end = p;
-		while(*end != '\0' && *end != '\'' && *end != '"' && *end != ' ' && *end != '>')
-			end++;
-		val = malloc(end - p + 1);
-		if(val == nil)
-			return nil;
-		memmove(val, p, end - p);
-		val[end - p] = '\0';
-		return val;
+		}
+		p = e + 1;
 	}
 	return nil;
 }
@@ -359,9 +362,7 @@ fortinet_auth(VpnSession *s)
 	r = vpn_urlencode(s->cfg->realm != nil ? s->cfg->realm : "");
 
 	if(u == nil || p == nil || r == nil){
-		free(u);
-		free(p);
-		free(r);
+		free(u); free(p); free(r);
 		return -1;
 	}
 
@@ -393,9 +394,7 @@ fortinet_auth(VpnSession *s)
 
 	close(tls_fd);
 
-	free(u);
-	free(p);
-	free(r);
+	free(u); free(p); free(r);
 
 	if(n <= 0){
 		fprint(2, "vpnfs: logincheck request failed\n");
@@ -408,27 +407,16 @@ fortinet_auth(VpnSession *s)
 
 	cookie_val = extract_cookie(resp, "SVPNCOOKIE");
 
-	/*
-	 * If we did not get a usable SVPNCOOKIE, or the server indicates
-	 * tokeninfo-style 2FA, try the second-stage login.
-	 */
 	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil){
 		magic_val = extract_field(resp, "magic");
 		reqid_val = extract_field(resp, "reqid");
 		polid_val = extract_field(resp, "polid");
 
-		if(cookie_val != nil){
-			free(cookie_val);
-			cookie_val = nil;
-		}
-
 		if(s->cfg->token != nil && s->cfg->token[0] != '\0'){
 			token_str = s->cfg->token;
 		}else{
 			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
-				free(magic_val);
-				free(reqid_val);
-				free(polid_val);
+				free(cookie_val); free(magic_val); free(reqid_val); free(polid_val);
 				return -1;
 			}
 			token_str = token_buf;
@@ -441,7 +429,7 @@ fortinet_auth(VpnSession *s)
 
 		if(u == nil || p == nil || r == nil || tenc == nil){
 			free(u); free(p); free(r); free(tenc);
-			free(magic_val); free(reqid_val); free(polid_val);
+			free(cookie_val); free(magic_val); free(reqid_val); free(polid_val);
 			return -1;
 		}
 
@@ -453,13 +441,8 @@ fortinet_auth(VpnSession *s)
 			reqid_val != nil ? reqid_val : "",
 			polid_val != nil ? polid_val : "");
 
-		free(u);
-		free(p);
-		free(r);
-		free(tenc);
-		free(magic_val);
-		free(reqid_val);
-		free(polid_val);
+		free(u); free(p); free(r); free(tenc);
+		free(cookie_val); free(magic_val); free(reqid_val); free(polid_val);
 
 		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
 		if(raw_fd < 0)

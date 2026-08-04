@@ -260,48 +260,42 @@ vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 	return 0;
 }
 
+static int
+vpn_post_srv(char *name, int fd)
+{
+	char path[64];
+	int sfd;
+
+	snprint(path, sizeof(path), "/srv/%s", name);
+	sfd = create(path, OWRITE, 0666);
+	if(sfd < 0)
+		return -1;
+
+	if(fprint(sfd, "%d", fd) < 0){
+		close(sfd);
+		return -1;
+	}
+
+	close(sfd);
+	return 0;
+}
+
 int
 vpn_create_pipes(VpnSession *s)
 {
-	int m, f, n, sfd;
-	char line[64];
+	int p[2];
 
-	m = open("/dev/ptmx", ORDWR);
-	if(m < 0){
-		fprint(2, "vpnfs: open /dev/ptmx: %r\n");
-		return -1;
-	}
-	n = read(m, line, sizeof(line) - 1);
-	if(n <= 0){
-		close(m);
-		fprint(2, "vpnfs: read /dev/ptmx: %r\n");
-		return -1;
-	}
-	line[n] = '\0';
-
-	snprint(s->ttyname, sizeof(s->ttyname), "/dev/ttyp%s", line);
-
-	/*
-	 * Segura o slave aberto para que writes no master nao falhem
-	 * antes do ppp(8) anexar.
-	 */
-	f = open(s->ttyname, ORDWR);
-	if(f < 0){
-		fprint(2, "vpnfs: open %s: %r\n", s->ttyname);
-		close(m);
+	if(pipe(p) < 0){
+		fprint(2, "vpnfs: pipe creation failed: %r\n");
 		return -1;
 	}
 
-	s->pipe_in = m;   /* child le (dados vindos do ppp)   */
-	s->pipe_out = m;  /* parent escreve (dados p/ o ppp)  */
-	s->srv_in_fd = f; /* slave retido                     */
+	s->pipe_in = p[0];    /* Main process reads packets coming from ppp */
+	s->pipe_out = p[0];   /* Main process writes packets coming from TLS to ppp */
+	s->srv_in_fd = p[1];  /* Retain reference descriptor to p[1] */
 	s->srv_out_fd = -1;
 
-	sfd = create("/srv/vpnfs", OWRITE, 0666);
-	if(sfd >= 0){
-		fprint(sfd, "%s", s->ttyname);
-		close(sfd);
-	}
+	snprint(s->ttyname, sizeof(s->ttyname), "/srv/vpnfs");
 
-	return 0;
+	return vpn_post_srv("vpnfs", p[1]);
 }
