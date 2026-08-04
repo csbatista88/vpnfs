@@ -184,6 +184,10 @@ extract_cookie(char *resp, char *cookie_name)
 	while(*end && *end != ';' && *end != '\r' && *end != '\n' && *end != '&' && *end != '"' && *end != ' ')
 		end++;
 
+	/* Ignora cookies com valor vazio (ex: Set-Cookie: SVPNCOOKIE=; expires=1984...) */
+	if(end == p)
+		return nil;
+
 	val = malloc(end - p + 1);
 	if(val == nil) return nil;
 
@@ -249,59 +253,6 @@ fortinet_init(VpnSession *s)
 	priv = mallocz(sizeof(FortinetPriv), 1);
 	if(priv == nil) return -1;
 	s->priv = priv;
-	return 0;
-}
-
-static int
-fortinet_activate_session(VpnSession *s)
-{
-	char req[512];
-	char resp[4096];
-	char *new_cookie;
-	int raw_fd, tls_fd, n, total;
-
-	if(s->cookie[0] == '\0')
-		return -1;
-
-	if(s->cfg->verbose)
-		print("vpnfs: activating session via GET /remote/fortisslvpn...\n");
-
-	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-	if(raw_fd < 0) return -1;
-
-	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-	if(tls_fd < 0) return -1;
-
-	snprint(req, sizeof(req),
-		"GET /remote/fortisslvpn HTTP/1.1\r\n"
-		"Host: %s\r\n"
-		"User-Agent: Mozilla/5.0 SV1\r\n"
-		"Cookie: %s\r\n"
-		"Connection: close\r\n\r\n",
-		s->cfg->host, s->cookie);
-
-	if(write(tls_fd, req, strlen(req)) != strlen(req)){
-		close(tls_fd);
-		return -1;
-	}
-
-	memset(resp, 0, sizeof(resp));
-	total = 0;
-	while(total < sizeof(resp) - 1){
-		n = read(tls_fd, resp + total, sizeof(resp) - 1 - total);
-		if(n <= 0)
-			break;
-		total += n;
-	}
-	resp[total] = '\0';
-	close(tls_fd);
-
-	new_cookie = extract_cookie(resp, "SVPNCOOKIE");
-	if(new_cookie != nil){
-		snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", new_cookie);
-		free(new_cookie);
-	}
-
 	return 0;
 }
 
@@ -463,9 +414,6 @@ fortinet_auth(VpnSession *s)
 	/* Tenta buscar o XML de configuracao na conexao autenticada */
 	fortinet_fetch_config(s, tls_fd);
 	close(tls_fd);
-
-	/* Ativa a sessao no FortiGate via /remote/fortisslvpn */
-	fortinet_activate_session(s);
 
 	return 0;
 }
