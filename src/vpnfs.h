@@ -49,11 +49,18 @@ struct VpnDriver {
 /* Driver registration / retrieval */
 VpnDriver *vpn_driver_lookup(char *name);
 
-/* Network & TLS helper functions (src/net_plan9.c) */
+/* Network & TLS helper functions */
 int  vpn_dial(char *host, char *port);
 int  vpn_pushtls(int fd, char *host);
-int  vpn_http_post(int fd, char *host, char *path, char *body, char *resp, int maxresp);
+
+/* HTTP helpers */
+int  vpn_http_request(int fd, char *host, char *port, char *method,
+                      char *path, char *ctype, char *body, char *cookie,
+                      char *resp, int maxresp);
 int  vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie);
+int  vpn_http_status(char *resp);
+char *vpn_urlencode(char *s);
+
 int  vpn_create_pipes(VpnSession *s);
 
 /* Driver declarations */

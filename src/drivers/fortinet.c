@@ -133,12 +133,11 @@ ppp_hdlc_decode(uchar *src, int srclen, uchar *dst, int dstmax)
 	}
 
 	if(d < 2)
-		return d; /* Se nao houver bytes suficientes para FCS, retorna payload cru */
+		return d;
 
-	/* Valida e remove o FCS-16 final (2 bytes) */
 	fcs = ppp_fcs16(PPP_INITFCS, dst, d);
 	if(fcs == PPP_GOODFCS){
-		d -= 2; /* Remove os 2 bytes de FCS */
+		d -= 2;
 	}
 
 	return d;
@@ -170,30 +169,102 @@ unchunk(char *body)
 static char*
 extract_cookie(char *resp, char *cookie_name)
 {
-	char *p, *end, *val;
-	int name_len;
+	char *hdr_end, *p, *end, *val;
+	int n;
 
-	name_len = strlen(cookie_name);
-	p = strstr(resp, cookie_name);
-	if(p == nil) return nil;
-
-	p += name_len;
-	if(*p == '=') p++;
-
-	end = p;
-	while(*end && *end != ';' && *end != '\r' && *end != '\n' && *end != '&' && *end != '"' && *end != ' ')
-		end++;
-
-	/* Ignora cookies com valor vazio (ex: Set-Cookie: SVPNCOOKIE=; expires=1984...) */
-	if(end == p)
+	if(resp == nil || cookie_name == nil)
 		return nil;
 
-	val = malloc(end - p + 1);
-	if(val == nil) return nil;
+	hdr_end = strstr(resp, "\r\n\r\n");
+	p = resp;
+	n = strlen(cookie_name);
 
-	memmove(val, p, end - p);
-	val[end - p] = '\0';
-	return val;
+	while(p != nil){
+		p = strstr(p, cookie_name);
+		if(p == nil)
+			break;
+
+		/* Only care about HTTP headers, not HTML/JS body. */
+		if(hdr_end != nil && p >= hdr_end)
+			break;
+
+		p += n;
+		if(*p == '=')
+			p++;
+
+		end = p;
+		while(*end != '\0' &&
+		      *end != ';' &&
+		      *end != '\r' &&
+		      *end != '\n' &&
+		      *end != '&' &&
+		      *end != '"' &&
+		      *end != ' ')
+			end++;
+
+		if(end > p){
+			val = malloc(end - p + 1);
+			if(val == nil)
+				return nil;
+			memmove(val, p, end - p);
+			val[end - p] = '\0';
+			return val;
+		}
+
+		/* Empty cookie value; skip and keep looking. */
+		p = end;
+		if(*p != '\0')
+			p++;
+		else
+			break;
+	}
+
+	return nil;
+}
+
+static char*
+extract_field(char *resp, char *name)
+{
+	char *p, *end, *val;
+	int n;
+
+	if(resp == nil || name == nil)
+		return nil;
+
+	p = resp;
+	n = strlen(name);
+
+	while((p = strstr(p, name)) != nil){
+		p += n;
+		if(*p == '=')
+			p++;
+
+		end = p;
+		while(*end != '\0' &&
+		      *end != ',' &&
+		      *end != '&' &&
+		      *end != '\r' &&
+		      *end != '\n' &&
+		      *end != '"')
+			end++;
+
+		if(end > p){
+			val = malloc(end - p + 1);
+			if(val == nil)
+				return nil;
+			memmove(val, p, end - p);
+			val[end - p] = '\0';
+			return val;
+		}
+
+		p = end;
+		if(*p != '\0')
+			p++;
+		else
+			break;
+	}
+
+	return nil;
 }
 
 static char*
@@ -257,44 +328,247 @@ fortinet_init(VpnSession *s)
 }
 
 static int
-fortinet_fetch_config(VpnSession *s, int tls_fd)
+fortinet_auth(VpnSession *s)
 {
-	char req[512];
-	char resp[4096];
-	char *ip, *dns1, *body;
-	int n, total;
+	int raw_fd, tls_fd, n, status;
+	char body[2048];
+	char resp[8192];
+	char *u, *p, *r, *tenc, *cookie_val;
+	char *magic_val, *reqid_val, *polid_val;
+	char token_buf[128];
+	char *token_str;
+
+	if(s->cfg->user == nil || s->cfg->pass == nil)
+		return -1;
+
+	u = vpn_urlencode(s->cfg->user);
+	p = vpn_urlencode(s->cfg->pass);
+	r = vpn_urlencode(s->cfg->realm != nil ? s->cfg->realm : "");
+
+	if(u == nil || p == nil || r == nil){
+		free(u);
+		free(p);
+		free(r);
+		return -1;
+	}
+
+	snprint(body, sizeof(body),
+		"username=%s&credential=%s&realm=%s&ajax=1&just_logged_in=1",
+		u, p, r);
+
+	if(s->cfg->verbose)
+		print("vpnfs: connecting to %s:%s for authentication...\n",
+			s->cfg->host, s->cfg->port);
+
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd < 0){
+		free(u); free(p); free(r);
+		return -1;
+	}
+
+	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+	if(tls_fd < 0){
+		close(raw_fd);
+		free(u); free(p); free(r);
+		return -1;
+	}
+
+	n = vpn_http_request(tls_fd, s->cfg->host, s->cfg->port,
+	                     "POST", "/remote/logincheck",
+	                     "application/x-www-form-urlencoded",
+	                     body, nil, resp, sizeof(resp));
+
+	close(tls_fd);
+
+	free(u);
+	free(p);
+	free(r);
+
+	if(n <= 0){
+		fprint(2, "vpnfs: logincheck request failed\n");
+		return -1;
+	}
+
+	status = vpn_http_status(resp);
+	if(s->cfg->verbose)
+		print("vpnfs: logincheck HTTP status %d\n", status);
+
+	cookie_val = extract_cookie(resp, "SVPNCOOKIE");
+
+	/*
+	 * If we did not get a usable SVPNCOOKIE, or the server indicates
+	 * tokeninfo-style 2FA, try the second-stage login.
+	 */
+	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil){
+		magic_val = extract_field(resp, "magic");
+		reqid_val = extract_field(resp, "reqid");
+		polid_val = extract_field(resp, "polid");
+
+		if(cookie_val != nil){
+			free(cookie_val);
+			cookie_val = nil;
+		}
+
+		if(s->cfg->token != nil && s->cfg->token[0] != '\0'){
+			token_str = s->cfg->token;
+		}else{
+			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
+				free(magic_val);
+				free(reqid_val);
+				free(polid_val);
+				return -1;
+			}
+			token_str = token_buf;
+		}
+
+		u = vpn_urlencode(s->cfg->user);
+		p = vpn_urlencode(s->cfg->pass);
+		r = vpn_urlencode(s->cfg->realm != nil ? s->cfg->realm : "");
+		tenc = vpn_urlencode(token_str);
+
+		if(u == nil || p == nil || r == nil || tenc == nil){
+			free(u); free(p); free(r); free(tenc);
+			free(magic_val); free(reqid_val); free(polid_val);
+			return -1;
+		}
+
+		snprint(body, sizeof(body),
+			"username=%s&credential=%s&code=%s&realm=%s"
+			"&magic=%s&reqid=%s&polid=%s&ajax=1",
+			u, p, tenc, r,
+			magic_val != nil ? magic_val : "",
+			reqid_val != nil ? reqid_val : "",
+			polid_val != nil ? polid_val : "");
+
+		free(u);
+		free(p);
+		free(r);
+		free(tenc);
+		free(magic_val);
+		free(reqid_val);
+		free(polid_val);
+
+		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+		if(raw_fd < 0)
+			return -1;
+
+		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+		if(tls_fd < 0){
+			close(raw_fd);
+			return -1;
+		}
+
+		n = vpn_http_request(tls_fd, s->cfg->host, s->cfg->port,
+		                     "POST", "/remote/logincheck",
+		                     "application/x-www-form-urlencoded",
+		                     body, nil, resp, sizeof(resp));
+
+		close(tls_fd);
+
+		if(n <= 0){
+			fprint(2, "vpnfs: second-stage logincheck failed\n");
+			return -1;
+		}
+
+		status = vpn_http_status(resp);
+		if(s->cfg->verbose)
+			print("vpnfs: second-stage logincheck HTTP status %d\n", status);
+
+		cookie_val = extract_cookie(resp, "SVPNCOOKIE");
+	}
+
+	if(cookie_val == nil){
+		fprint(2, "vpnfs: SVPNCOOKIE not found\n");
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: last login response:\n%s\n", resp);
+		return -1;
+	}
+
+	snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", cookie_val);
+	free(cookie_val);
+
+	if(s->cfg->verbose)
+		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
+
+	return 0;
+}
+
+static int
+fortinet_fetch_config(VpnSession *s)
+{
+	int raw_fd, tls_fd, n, status;
+	char resp[8192];
+	char *body, *ip, *dns1;
 	FortinetPriv *priv = s->priv;
 
 	if(s->cookie[0] == '\0')
 		return -1;
 
 	if(s->cfg->verbose)
-		print("vpnfs: fetching XML configuration on authenticated TLS connection...\n");
+		print("vpnfs: fetching XML configuration on new TLS connection...\n");
 
-	snprint(req, sizeof(req),
-		"GET /remote/fortisslvpn_xml?dual_stack=1 HTTP/1.1\r\n"
-		"Host: %s\r\n"
-		"User-Agent: Mozilla/5.0 SV1\r\n"
-		"Cookie: %s\r\n"
-		"Connection: close\r\n\r\n",
-		s->cfg->host, s->cookie);
+	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+	if(raw_fd < 0)
+		return -1;
 
-	if(write(tls_fd, req, strlen(req)) != strlen(req)){
+	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+	if(tls_fd < 0){
+		close(raw_fd);
+		return -1;
+	}
+
+	/*
+	 * Try the plain XML endpoint first. Some FortiOS boxes dislike
+	 * dual_stack depending on configuration.
+	 */
+	n = vpn_http_request(tls_fd, s->cfg->host, s->cfg->port,
+	                     "GET", "/remote/fortisslvpn_xml",
+	                     nil, nil, s->cookie, resp, sizeof(resp));
+
+	close(tls_fd);
+
+	if(n <= 0){
+		fprint(2, "vpnfs: XML config request failed\n");
+		return -1;
+	}
+
+	status = vpn_http_status(resp);
+
+	if(status != 200){
 		if(s->cfg->verbose)
-			fprint(2, "vpnfs: warning: XML config request write failed\n");
-		return 0;
+			print("vpnfs: XML config without dual_stack returned HTTP %d; retrying with dual_stack\n",
+				status);
+
+		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
+		if(raw_fd < 0)
+			return -1;
+
+		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
+		if(tls_fd < 0){
+			close(raw_fd);
+			return -1;
+		}
+
+		n = vpn_http_request(tls_fd, s->cfg->host, s->cfg->port,
+		                     "GET", "/remote/fortisslvpn_xml?dual_stack=1",
+		                     nil, nil, s->cookie, resp, sizeof(resp));
+
+		close(tls_fd);
+
+		if(n <= 0){
+			fprint(2, "vpnfs: dual_stack XML config request failed\n");
+			return -1;
+		}
+
+		status = vpn_http_status(resp);
 	}
 
-	memset(resp, 0, sizeof(resp));
-	total = 0;
-
-	while(total < sizeof(resp) - 1){
-		n = read(tls_fd, resp + total, sizeof(resp) - 1 - total);
-		if(n <= 0)
-			break;
-		total += n;
+	if(status != 200){
+		fprint(2, "vpnfs: XML configuration failed with HTTP %d\n", status);
+		if(s->cfg->verbose)
+			fprint(2, "vpnfs: response:\n%s\n", resp);
+		return -1;
 	}
-	resp[total] = '\0';
 
 	body = strstr(resp, "\r\n\r\n");
 	if(body != nil){
@@ -305,115 +579,25 @@ fortinet_fetch_config(VpnSession *s, int tls_fd)
 		body = resp;
 	}
 
-	if(s->cfg->verbose){
-		print("vpnfs: XML config response (%d bytes):\n%s\n", total, body);
-	}
-
-	if(strstr(resp, "200 OK") == nil){
-		if(s->cfg->verbose)
-			fprint(2, "vpnfs: XML configuration endpoint returned non-200 (proceeding with tunnel)\n");
-		return 0;
-	}
+	if(s->cfg->verbose)
+		print("vpnfs: XML config response (%d bytes):\n%s\n", n, body);
 
 	ip = extract_xml_tag(body, "assigned-addr", "ipv4");
 	dns1 = extract_xml_tag(body, "dns", "ip");
 
 	if(ip != nil){
 		snprint(priv->ip, sizeof(priv->ip), "%s", ip);
-		if(s->cfg->verbose) print("vpnfs: assigned virtual IP: %s\n", ip);
+		if(s->cfg->verbose)
+			print("vpnfs: assigned virtual IP: %s\n", ip);
 		free(ip);
 	}
 
 	if(dns1 != nil){
 		snprint(priv->dns1, sizeof(priv->dns1), "%s", dns1);
-		if(s->cfg->verbose) print("vpnfs: assigned DNS server: %s\n", dns1);
+		if(s->cfg->verbose)
+			print("vpnfs: assigned DNS server: %s\n", dns1);
 		free(dns1);
 	}
-
-	return 0;
-}
-
-static int
-fortinet_auth(VpnSession *s)
-{
-	int raw_fd, tls_fd, n;
-	char body[1024];
-	char resp[4096];
-	char *cookie_val;
-	char *token_str;
-	char token_buf[128];
-
-	if(s->cfg->user == nil || s->cfg->pass == nil) return -1;
-
-	snprint(body, sizeof(body), "username=%s&credential=%s&ajax=1&just_logged_in=1",
-		s->cfg->user, s->cfg->pass);
-
-	if(s->cfg->verbose)
-		print("vpnfs: connecting to %s:%s for authentication...\n", s->cfg->host, s->cfg->port);
-
-	raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-	if(raw_fd < 0) return -1;
-	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-	if(tls_fd < 0) return -1;
-
-	n = vpn_http_post(tls_fd, s->cfg->host, "remote/logincheck", body, resp, sizeof(resp));
-
-	cookie_val = extract_cookie(resp, "SVPNCOOKIE");
-
-	if(cookie_val == nil || strstr(resp, "tokeninfo=") != nil || strstr(resp, "2fa") != nil){
-		char *magic_val = extract_cookie(resp, "magic");
-		char *reqid_val = extract_cookie(resp, "reqid");
-		char *polid_val = extract_cookie(resp, "polid");
-
-		if(cookie_val != nil) free(cookie_val);
-		close(tls_fd);
-
-		if(s->cfg->token != nil && *s->cfg->token != '\0'){
-			token_str = s->cfg->token;
-		}else{
-			if(prompt_token("FortiToken Code: ", token_buf, sizeof(token_buf)) == nil){
-				free(magic_val); free(reqid_val); free(polid_val);
-				return -1;
-			}
-			token_str = token_buf;
-		}
-
-		snprint(body, sizeof(body),
-			"username=%s&credential=%s&code=%s&magic=%s&reqid=%s&polid=%s&ajax=1",
-			s->cfg->user, s->cfg->pass, token_str,
-			magic_val ? magic_val : "",
-			reqid_val ? reqid_val : "",
-			polid_val ? polid_val : "");
-
-		free(magic_val); free(reqid_val); free(polid_val);
-
-		raw_fd = vpn_dial(s->cfg->host, s->cfg->port);
-		if(raw_fd < 0) return -1;
-		tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-		if(tls_fd < 0) return -1;
-
-		n = vpn_http_post(tls_fd, s->cfg->host, "remote/logincheck", body, resp, sizeof(resp));
-
-		if(n <= 0){ close(tls_fd); return -1; }
-
-		cookie_val = extract_cookie(resp, "SVPNCOOKIE");
-	}
-
-	if(cookie_val == nil){
-		close(tls_fd);
-		fprint(2, "vpnfs: SVPNCOOKIE not found\n");
-		return -1;
-	}
-
-	snprint(s->cookie, sizeof(s->cookie), "SVPNCOOKIE=%s", cookie_val);
-	free(cookie_val);
-
-	if(s->cfg->verbose)
-		print("vpnfs: authenticated successfully (got SVPNCOOKIE)\n");
-
-	/* Tenta buscar o XML de configuracao na conexao autenticada */
-	fortinet_fetch_config(s, tls_fd);
-	close(tls_fd);
 
 	return 0;
 }
@@ -428,6 +612,16 @@ fortinet_connect_tunnel(VpnSession *s)
 		return -1;
 	}
 
+	/*
+	 * Important: Fortinet expects the XML configuration request to be
+	 * performed as part of session setup. Skipping it can cause 403
+	 * on /remote/sslvpn-tunnel.
+	 */
+	if(fortinet_fetch_config(s) < 0){
+		fprint(2, "vpnfs: unable to fetch Fortinet XML configuration\n");
+		return -1;
+	}
+
 	if(s->cfg->verbose)
 		print("vpnfs: opening dedicated TLS connection for tunnel upgrade...\n");
 
@@ -436,8 +630,10 @@ fortinet_connect_tunnel(VpnSession *s)
 		return -1;
 
 	tls_fd = vpn_pushtls(raw_fd, s->cfg->host);
-	if(tls_fd < 0)
+	if(tls_fd < 0){
+		close(raw_fd);
 		return -1;
+	}
 
 	if(vpn_http_get_tunnel(tls_fd, s->cfg->host, s->cfg->port, s->cookie) < 0){
 		close(tls_fd);
@@ -462,7 +658,7 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 	if(readn(s->tls_fd, hdr, 2) != 2)
 		return -1;
 
-	/* Intercepta erro HTTP retornado pelo FortiGate no upgrade do tunel */
+	/* Intercept HTTP error status if FortiGate rejects the tunnel upgrade */
 	if(hdr[0] == 'H' && hdr[1] == 'T'){
 		char errbuf[1024];
 		int n;
@@ -489,7 +685,7 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 	if(len >= 6 && memcmp(payload, "GFtype", 6) == 0){
 		if(s->cfg->verbose)
 			print("vpnfs: filtered Fortinet GFtype heartbeat packet (%d bytes)\n", len);
-		return 0; /* Retorna 0 para o main loop ignorar e continuar a leitura */
+		return 0;
 	}
 
 	/* TRADUÇÃO: Encapsula o PPP Raw em quadro HDLC (RFC 1662) com FCS-16 para o ppp(8) do 9front */
@@ -503,12 +699,10 @@ fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 	uchar payload[VPN_BUFSIZE];
 	int rawlen;
 
-	/* TRADUÇÃO: Decodifica o quadro HDLC do ppp(8) extraindo o payload PPP Raw */
 	rawlen = ppp_hdlc_decode(buf, len, payload, sizeof(payload));
 	if(rawlen <= 0)
 		return -1;
 
-	/* Encapsulamento Fortinet (2 bytes de tamanho Big-Endian + payload PPP Raw) */
 	hdr[0] = (rawlen >> 8) & 0xFF;
 	hdr[1] = rawlen & 0xFF;
 

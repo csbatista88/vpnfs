@@ -17,7 +17,24 @@
 
 ---
 
-## 2. Modular Architecture (`VpnDriver`)
+## 2. OpenConnect 3-Stage TLS Connection Lifecycle
+
+`vpnfs` implements OpenConnect's 3-stage TLS lifecycle for Fortinet SSL-VPN:
+
+```
+[ Stage 1: Auth ]
+   POST /remote/logincheck (URL Encoded Params) ---> SVPNCOOKIE ---> Close TLS Conn 1/2
+
+[ Stage 2: Session Setup & XML Config ]
+   GET /remote/fortisslvpn_xml (New TLS Conn 3) ---> Parse IP/DNS ---> Close TLS Conn 3
+
+[ Stage 3: Tunnel Upgrade ]
+   GET /remote/sslvpn-tunnel (New TLS Conn 4) ---> Keep-Alive ---> Binary PPP Exchange
+```
+
+---
+
+## 3. Modular Architecture (`VpnDriver`)
 
 `vpnfs` is designed around a modular driver interface defined in `src/vpnfs.h`:
 
@@ -35,39 +52,21 @@ struct VpnDriver {
 
 ---
 
-## 3. Protocol Flow & Framing Translation Layer
-
-```
-[ FortiGate Gateway ]                       [ vpnfs ]                              [ Plan 9 ppp(8) Daemon ]
-         |                                      |                                             |
-         |<--- 1. TCP Dial & TLS (Port 10443) ->|                                             |
-         |<--- HTTP POST /remote/logincheck ----|                                             |
-         |---> HTTP 200 OK + SVPNCOOKIE --------|                                             |
-         |                                      |                                             |
-         |<--- HTTP GET /remote/fortisslvpn_xml |                                             |
-         |---> XML Config (Decoded via unchunk)-|                                             |
-         |     [Close Auth TLS Connection]      |                                             |
-         |                                      |                                             |
-         |<--- 2. Dedicated TCP Dial & TLS ---->|                                             |
-         |<--- HTTP GET /remote/sslvpn-tunnel --|                                             |
-         |                                      |                                             |
-         |<=== PPP Raw + 2-byte Length Header =>|                                             |
-         |     (Filter out GFtype heartbeats)   |<=== HDLC Async Frames (RFC 1662 + FCS) ====>|
-         |                                      |     read/write via /srv/vpnfs               |
-```
-
----
-
 ## 4. Key Components
 
-### A. GFtype Heartbeat Filter
+### A. URL Encoding & Header Engine
+- **`vpn_urlencode()`:** Encodes credentials, realms, and 2FA tokens (`username=%s&credential=%s...`).
+- **`extract_cookie()`:** Restricted exclusively to HTTP response headers (before `\r\n\r\n`), ignoring empty clearing cookies.
+- **`extract_field()`:** Field extractor for comma-separated 2FA challenge responses (`magic`, `reqid`, `polid`).
+
+### B. GFtype Heartbeat Filter
 Fortinet gateways periodically inject proprietary keepalive packets starting with `"GFtype\0heartbeat\0"`. `fortinet_read_packet()` intercepts and drops these packets (returning `0` to cause the `main.c` packet loop to `continue`), preventing HDLC CRC corruption in `ppp(8)`.
 
-### B. RFC 1662 HDLC Framer / Unframer
+### C. RFC 1662 HDLC Framer / Unframer
 - **`ppp_hdlc_encode()`:** Translates Fortinet PPP Raw payloads into standard HDLC Async frames (`0x7E` flags, `0x7D` byte escaping, 16-bit FCS CRC) before writing to `/srv/vpnfs.out`.
 - **`ppp_hdlc_decode()`:** Un-escapes HDLC frames received from `/srv/vpnfs.in` and strips the FCS CRC to extract the PPP Raw payload before adding the 2-byte Big-Endian length header for TLS transmission.
 
-### C. Native `/srv` Posting
+### D. Native `/srv` Posting
 `vpn_create_pipes()` posts `/srv/vpnfs.in`, `/srv/vpnfs.out`, and `/srv/vpnfs` using standard Plan 9 `create("/srv/<name>", OWRITE, 0666)` and `fprint(sfd, "%d", fd)`, enabling `ppp(8)` to attach directly to the tunnel.
 
 ---
