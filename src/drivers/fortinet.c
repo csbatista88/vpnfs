@@ -543,30 +543,51 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 		return 0;
 	}
 
-	/* Fortinet TLS envia PPP Raw. Repassa o payload PPP Raw diretamente para o ip/ppp */
-	if(len > maxlen)
-		return -1;
-
-	memmove(buf, payload, len);
-	return len;
+	/* TRADUÇÃO RX: Fortinet TLS -> Plan 9 ip/ppp getframe.
+	 * Adiciona 0xFF 0x03 se ausente para o ip/ppp do Plan 9 reconhecer o protocolo PPP.
+	 */
+	if(len >= 2 && payload[0] == 0xFF && payload[1] == 0x03){
+		if(len > maxlen) return -1;
+		memmove(buf, payload, len);
+		return len;
+	}else{
+		if(len + 2 > maxlen) return -1;
+		buf[0] = 0xFF;
+		buf[1] = 0x03;
+		memmove(buf + 2, payload, len);
+		return len + 2;
+	}
 }
 
 static int
 fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 {
 	uchar hdr[2];
+	uchar *ptr = buf;
+	int sendlen = len;
 
 	if(len <= 0 || len > VPN_BUFSIZE)
 		return -1;
 
-	/* Encapsulamento Fortinet (2 bytes de tamanho Big-Endian + payload PPP Raw do ip/ppp) */
-	hdr[0] = (len >> 8) & 0xFF;
-	hdr[1] = len & 0xFF;
+	/* TRADUÇÃO TX: Plan 9 ip/ppp putframe -> Fortinet TLS.
+	 * Remove 0xFF 0x03 inserido pelo ip/ppp antes de enviar para o FortiGate no TLS.
+	 */
+	if(sendlen >= 2 && ptr[0] == 0xFF && ptr[1] == 0x03){
+		ptr += 2;
+		sendlen -= 2;
+	}
+
+	if(sendlen <= 0)
+		return -1;
+
+	/* Encapsulamento Fortinet (2 bytes de tamanho Big-Endian + payload PPP Raw) */
+	hdr[0] = (sendlen >> 8) & 0xFF;
+	hdr[1] = sendlen & 0xFF;
 
 	if(write(s->tls_fd, hdr, 2) != 2)
 		return -1;
 
-	if(write(s->tls_fd, buf, len) != len)
+	if(write(s->tls_fd, ptr, sendlen) != sendlen)
 		return -1;
 
 	return len;
