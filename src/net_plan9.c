@@ -287,32 +287,19 @@ vpn_post_srv(char *name, int fd)
 int
 vpn_create_pipes(VpnSession *s)
 {
-	int p_to_ppp[2], p_from_ppp[2];
+	int p[2];
 
-	if(pipe(p_to_ppp) < 0 || pipe(p_from_ppp) < 0){
+	if(pipe(p) < 0){
 		fprint(2, "vpnfs: pipe creation failed: %r\n");
 		return -1;
 	}
 
-	/* TLS -> ip/ppp:
-	 * vpnfs writes TLS packets to s->pipe_out (p_to_ppp[1]),
-	 * ip/ppp reads from its STDIN (0) from p_to_ppp[0].
-	 */
-	s->pipe_out = p_to_ppp[1];
-	s->srv_out_fd = p_to_ppp[0];
-
-	/* ip/ppp -> TLS:
-	 * ip/ppp writes outgoing network packets to its STDOUT (1) (p_from_ppp[1]),
-	 * vpnfs reads from s->pipe_in (p_from_ppp[0]) to send over TLS.
-	 */
-	s->pipe_in = p_from_ppp[0];
-	s->srv_in_fd = p_from_ppp[1];
+	s->pipe_in = p[0];    /* vpnfs reads outgoing packets from ip/ppp */
+	s->pipe_out = p[0];   /* vpnfs writes incoming packets from TLS to ip/ppp */
+	s->srv_in_fd = p[1];  /* Reference descriptor for /srv/vpnfs device */
+	s->srv_out_fd = -1;
 
 	snprint(s->ttyname, sizeof(s->ttyname), "/srv/vpnfs");
 
-	if(vpn_post_srv("vpnfs.in", s->srv_out_fd) < 0) return -1;
-	if(vpn_post_srv("vpnfs.out", s->srv_in_fd) < 0) return -1;
-	if(vpn_post_srv("vpnfs", s->srv_in_fd) < 0) return -1;
-
-	return 0;
+	return vpn_post_srv("vpnfs", p[1]);
 }

@@ -93,26 +93,24 @@ main(int argc, char *argv[])
 	if(driver->connect_tunnel(&session) < 0)
 		sysfatal("tunnel connection failed");
 
-	print("vpnfs: tunnel active. System pipes posted at /srv/vpnfs.in and /srv/vpnfs.out\n");
+	print("vpnfs: tunnel active. System pipe posted at %s\n", session.ttyname);
 
-	/* Automatically spawn /bin/ip/ppp daemon with HDLC framing over stream I/O */
+	/* Automatically spawn /bin/ip/ppp daemon on the posted /srv/vpnfs device */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
 		break;
 	case 0:
-		dup(session.srv_out_fd, 0); /* STDIN (0) = read packets from TLS (p_to_ppp[0]) */
-		dup(session.srv_in_fd, 1);  /* STDOUT (1) = write packets to TLS (p_from_ppp[1]) */
 		if(cfg.verbose)
-			print("vpnfs: starting /bin/ip/ppp -P -f -m 1400 on stream I/O...\n");
-		execl("/bin/ip/ppp", "ppp", "-P", "-f", "-m", "1400", nil);
+			print("vpnfs: starting /bin/ip/ppp -P -f -m 1400 -p %s...\n", session.ttyname);
+		execl("/bin/ip/ppp", "ppp", "-P", "-f", "-m", "1400", "-p", session.ttyname, nil);
 		fprint(2, "vpnfs: exec /bin/ip/ppp failed: %r\n");
 		exits("exec ppp failed");
 	}
 
 	/* Fork process for bi-directional I/O:
-	 * Parent: TLS -> Pipe Out (p_to_ppp[1])
-	 * Child:  Pipe In (p_from_ppp[0]) -> TLS
+	 * Parent: TLS -> Pipe Out (ptmx / srv pipe)
+	 * Child:  Pipe In (ptmx / srv pipe) -> TLS
 	 */
 	switch(rfork(RFPROC|RFMEM)){
 	case -1:
