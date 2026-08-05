@@ -101,8 +101,8 @@ main(int argc, char *argv[])
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
 		break;
 	case 0:
-		dup(session.srv_in_fd, 0);  /* Redirect stdin to pipe_in (/srv/vpnfs.in reader) */
-		dup(session.srv_out_fd, 1); /* Redirect stdout to pipe_out (/srv/vpnfs.out writer) */
+		dup(session.srv_out_fd, 0); /* STDIN (0) = read packets from TLS (p_to_ppp[0]) */
+		dup(session.srv_in_fd, 1);  /* STDOUT (1) = write packets to TLS (p_from_ppp[1]) */
 		if(cfg.verbose)
 			print("vpnfs: starting /bin/ip/ppp -P -f -m 1400 on stream I/O...\n");
 		execl("/bin/ip/ppp", "ppp", "-P", "-f", "-m", "1400", nil);
@@ -111,8 +111,8 @@ main(int argc, char *argv[])
 	}
 
 	/* Fork process for bi-directional I/O:
-	 * Parent: TLS -> Pipe Out
-	 * Child:  Pipe In -> TLS
+	 * Parent: TLS -> Pipe Out (p_to_ppp[1])
+	 * Child:  Pipe In (p_from_ppp[0]) -> TLS
 	 */
 	switch(rfork(RFPROC|RFMEM)){
 	case -1:
