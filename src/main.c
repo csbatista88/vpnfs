@@ -7,6 +7,8 @@ struct FortinetPriv {
 	char ip[64];
 	char dns1[64];
 	char dns2[64];
+	uchar txbuf[2 * VPN_BUFSIZE];
+	int txlen;
 };
 
 VpnDriver *drivers[] = {
@@ -103,8 +105,10 @@ main(int argc, char *argv[])
 	print("vpnfs: tunnel active. Communication pipes established (STDIN/STDOUT).\n");
 
 	/* Automatically spawn /bin/ip/ppp daemon:
-	 * STDIN (0)  = reads TLS packets from p_to_ppp[0]
-	 * STDOUT (1) = writes network packets to p_from_ppp[1]
+	 * STDIN (0)  = reads HDLC packets from p_to_ppp[0]
+	 * STDOUT (1) = writes HDLC packets to p_from_ppp[1]
+	 * STDERR (2) = redirected to /dev/null (shields RIO terminal window from rc -I)
+	 * Flags: -P (Primary), -f (HDLC framing for pipes), -m 1400 (MTU)
 	 */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
@@ -113,6 +117,15 @@ main(int argc, char *argv[])
 	case 0:
 		dup(session.srv_out_fd, 0); /* STDIN  (0) = read packets from TLS (p_to_ppp[0]) */
 		dup(session.srv_in_fd, 1);  /* STDOUT (1) = write packets to TLS (p_from_ppp[1]) */
+
+		{
+			int nullfd = open("/dev/null", ORDWR);
+			if(nullfd >= 0){
+				dup(nullfd, 2);     /* STDERR (2) = /dev/null (shields RIO terminal window) */
+				close(nullfd);
+			}
+		}
+
 		close(session.srv_out_fd);
 		close(session.srv_in_fd);
 		close(session.pipe_in);
@@ -123,12 +136,12 @@ main(int argc, char *argv[])
 			char *iparg = (priv && priv->ip[0]) ? priv->ip : nil;
 
 			if(cfg.verbose)
-				print("vpnfs: starting /bin/ip/ppp -P -m 1400 %s...\n", iparg ? iparg : "");
+				print("vpnfs: starting /bin/ip/ppp -P -f -m 1400 %s...\n", iparg ? iparg : "");
 
 			if(iparg != nil)
-				execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", iparg, nil);
+				execl("/bin/ip/ppp", "ppp", "-P", "-f", "-m", "1400", iparg, nil);
 			else
-				execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", nil);
+				execl("/bin/ip/ppp", "ppp", "-P", "-f", "-m", "1400", nil);
 		}
 		fprint(2, "vpnfs: exec /bin/ip/ppp failed: %r\n");
 		exits("exec ppp failed");

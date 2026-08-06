@@ -9,7 +9,134 @@ struct FortinetPriv {
 	char ip[64];
 	char dns1[64];
 	char dns2[64];
+	uchar txbuf[2 * VPN_BUFSIZE];
+	int txlen;
 };
+
+static ushort fcstab[256] = {
+      0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
+      0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
+      0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
+      0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876,
+      0x2102, 0x308b, 0x0210, 0x1399, 0x6726, 0x76af, 0x4434, 0x55bd,
+      0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
+      0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c,
+      0xbdcb, 0xac42, 0x9ed9, 0x8f50, 0xfbef, 0xea66, 0xd8fd, 0xc974,
+      0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
+      0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3,
+      0x5285, 0x430c, 0x7197, 0x601e, 0x14a1, 0x0528, 0x37b3, 0x263a,
+      0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
+      0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
+      0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
+      0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
+      0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
+      0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
+      0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
+      0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
+      0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
+      0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
+      0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
+      0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
+      0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
+      0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
+      0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
+      0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
+      0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
+      0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
+      0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
+      0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
+      0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
+};
+
+#define PPP_INITFCS 0xffff
+#define PPP_GOODFCS 0xf0b8
+#define PPP_FLAG    0x7e
+#define PPP_ESC     0x7d
+
+static ushort
+ppp_fcs16(ushort fcs, uchar *cp, int len)
+{
+	while(len--)
+		fcs = (fcs >> 8) ^ fcstab[(fcs ^ *cp++) & 0xff];
+	return fcs;
+}
+
+static int
+ppp_hdlc_encode(uchar *src, int len, uchar *dst, int maxdst)
+{
+	ushort fcs;
+	uchar *d = dst;
+	uchar c;
+	int i;
+
+	if(maxdst < len * 2 + 10)
+		return -1;
+
+	fcs = ppp_fcs16(PPP_INITFCS, src, len);
+	fcs ^= 0xffff;
+
+	*d++ = PPP_FLAG;
+	for(i = 0; i < len; i++){
+		c = src[i];
+		if(c == PPP_FLAG || c == PPP_ESC || c < 0x20){
+			*d++ = PPP_ESC;
+			*d++ = c ^ 0x20;
+		}else{
+			*d++ = c;
+		}
+	}
+
+	c = fcs & 0xff;
+	if(c == PPP_FLAG || c == PPP_ESC || c < 0x20){
+		*d++ = PPP_ESC;
+		*d++ = c ^ 0x20;
+	}else{
+		*d++ = c;
+	}
+
+	c = (fcs >> 8) & 0xff;
+	if(c == PPP_FLAG || c == PPP_ESC || c < 0x20){
+		*d++ = PPP_ESC;
+		*d++ = c ^ 0x20;
+	}else{
+		*d++ = c;
+	}
+
+	*d++ = PPP_FLAG;
+	return d - dst;
+}
+
+static int
+ppp_hdlc_decode(uchar *src, int len, uchar *dst, int maxdst)
+{
+	uchar *d = dst;
+	uchar c;
+	int i;
+	ushort fcs;
+
+	for(i = 0; i < len; i++){
+		c = src[i];
+		if(c == PPP_FLAG)
+			continue;
+		if(c == PPP_ESC){
+			if(i + 1 >= len)
+				break;
+			c = src[++i] ^ 0x20;
+		}
+		if(d - dst >= maxdst)
+			return -1;
+		*d++ = c;
+	}
+
+	if(d - dst < 4)
+		return -1;
+
+	fcs = ppp_fcs16(PPP_INITFCS, dst, d - dst);
+	if(fcs != PPP_GOODFCS)
+		return -1;
+
+	return (d - dst) - 2;
+}
 
 static void
 unchunk(char *body)
@@ -508,6 +635,7 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 {
 	uchar hdr[2];
 	uchar payload[VPN_BUFSIZE];
+	uchar frame[VPN_BUFSIZE];
 	int len;
 
 	if(readn(s->tls_fd, hdr, 2) != 2)
@@ -543,53 +671,67 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 		return 0;
 	}
 
-	/* TRADUÇÃO RX: Fortinet TLS -> Plan 9 ip/ppp getframe.
-	 * Adiciona 0xFF 0x03 se ausente para o ip/ppp do Plan 9 reconhecer o protocolo PPP.
-	 */
-	if(len >= 2 && payload[0] == 0xFF && payload[1] == 0x03){
-		if(len > maxlen) return -1;
-		memmove(buf, payload, len);
-		return len;
-	}else{
-		if(len + 2 > maxlen) return -1;
-		buf[0] = 0xFF;
-		buf[1] = 0x03;
-		memmove(buf + 2, payload, len);
-		return len + 2;
-	}
+	/* RX (TLS -> STDIN of ip/ppp): Encapsulate Raw PPP into HDLC with FF 03 for ip/ppp -f */
+	if(len + 2 > (int)sizeof(frame))
+		return -1;
+
+	frame[0] = 0xFF;
+	frame[1] = 0x03;
+	memmove(frame + 2, payload, len);
+
+	return ppp_hdlc_encode(frame, len + 2, buf, maxlen);
 }
 
 static int
 fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 {
+	FortinetPriv *priv = s->priv;
+	uchar payload[VPN_BUFSIZE];
 	uchar hdr[2];
-	uchar *ptr = buf;
-	int sendlen = len;
+	int i, start, lastflag, rawlen, rest;
 
-	if(len <= 0 || len > VPN_BUFSIZE)
+	if(priv == nil)
 		return -1;
 
-	/* TRADUÇÃO TX: Plan 9 ip/ppp putframe -> Fortinet TLS.
-	 * Remove 0xFF 0x03 inserido pelo ip/ppp antes de enviar para o FortiGate no TLS.
-	 */
-	if(sendlen >= 2 && ptr[0] == 0xFF && ptr[1] == 0x03){
-		ptr += 2;
-		sendlen -= 2;
+	if(priv->txlen + len > (int)sizeof(priv->txbuf))
+		priv->txlen = 0; /* Overflow: resync buffer */
+
+	memmove(priv->txbuf + priv->txlen, buf, len);
+	priv->txlen += len;
+
+	start = -1;
+	lastflag = -1;
+	for(i = 0; i < priv->txlen; i++){
+		if(priv->txbuf[i] != PPP_FLAG)
+			continue;
+		if(start >= 0 && i > start){
+			rawlen = ppp_hdlc_decode(priv->txbuf + start, i - start, payload, sizeof(payload));
+			if(rawlen >= 2){
+				if(payload[0] == 0xFF && payload[1] == 0x03){
+					memmove(payload, payload + 2, rawlen - 2);
+					rawlen -= 2;
+				}
+				if(rawlen >= 2){
+					hdr[0] = (rawlen >> 8) & 0xFF;
+					hdr[1] = rawlen & 0xFF;
+					if(write(s->tls_fd, hdr, 2) != 2 ||
+					   write(s->tls_fd, payload, rawlen) != rawlen){
+						priv->txlen = 0;
+						return -1;
+					}
+				}
+			}
+		}
+		start = i + 1;
+		lastflag = i;
 	}
 
-	if(sendlen <= 0)
-		return -1;
+	if(lastflag < 0)
+		return len; /* Incomplete frame: keep accumulating */
 
-	/* Encapsulamento Fortinet (2 bytes de tamanho Big-Endian + payload PPP Raw) */
-	hdr[0] = (sendlen >> 8) & 0xFF;
-	hdr[1] = sendlen & 0xFF;
-
-	if(write(s->tls_fd, hdr, 2) != 2)
-		return -1;
-
-	if(write(s->tls_fd, ptr, sendlen) != sendlen)
-		return -1;
-
+	rest = priv->txlen - (lastflag + 1);
+	memmove(priv->txbuf, priv->txbuf + lastflag + 1, rest);
+	priv->txlen = rest;
 	return len;
 }
 
