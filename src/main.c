@@ -142,7 +142,7 @@ main(int argc, char *argv[])
 	 * Parent: TLS -> Pipe Out (p_to_ppp[1] -> STDIN of ip/ppp)
 	 * Child:  Pipe In (p_from_ppp[0] <- STDOUT of ip/ppp) -> TLS
 	 */
-	switch(rfork(RFPROC|RFFDG)){
+	switch(rfork(RFPROC|RFMEM)){
 	case -1:
 		sysfatal("rfork failed: %r");
 	case 0:
@@ -151,7 +151,6 @@ main(int argc, char *argv[])
 			if(driver->write_packet(&session, buf, n) < 0)
 				break;
 		}
-		postnote(PNGROUP, getpid(), "die");
 		exits(nil);
 	default:
 		/* Parent process: read packets from TLS tunnel and write to system pipe */
@@ -162,7 +161,6 @@ main(int argc, char *argv[])
 				break;
 		}
 		driver->close(&session);
-		postnote(PNGROUP, getpid(), "die");
 		exits(nil);
 	}
 }
