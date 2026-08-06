@@ -2,6 +2,13 @@
 #include <libc.h>
 #include "vpnfs.h"
 
+typedef struct FortinetPriv FortinetPriv;
+struct FortinetPriv {
+	char ip[64];
+	char dns1[64];
+	char dns2[64];
+};
+
 VpnDriver *drivers[] = {
 	&fortinet_driver,
 	nil
@@ -93,28 +100,47 @@ main(int argc, char *argv[])
 	if(driver->connect_tunnel(&session) < 0)
 		sysfatal("tunnel connection failed");
 
-	print("vpnfs: tunnel active. System pipes posted at /srv/vpnfs.in and /srv/vpnfs.out\n");
+	print("vpnfs: tunnel active. Communication pipes established (STDIN/STDOUT).\n");
 
 	/* Automatically spawn /bin/ip/ppp daemon:
-	 * STDIN (0) = reads TLS packets from /srv/vpnfs.in
-	 * -p /srv/vpnfs.out = writes outgoing network packets to /srv/vpnfs.out
+	 * STDIN (0)  = reads TLS packets from p_to_ppp[0]
+	 * STDOUT (1) = writes network packets to p_from_ppp[1]
 	 */
 	switch(rfork(RFPROC|RFFDG|RFNOTEG)){
 	case -1:
 		fprint(2, "vpnfs: warning: failed to fork ppp daemon: %r\n");
 		break;
 	case 0:
-		dup(session.srv_out_fd, 0); /* STDIN (0) = read packets from TLS (p_to_ppp[0]) */
-		if(cfg.verbose)
-			print("vpnfs: starting /bin/ip/ppp -P -m 1400 -p /srv/vpnfs.out...\n");
-		execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", "-p", "/srv/vpnfs.out", nil);
+		dup(session.srv_out_fd, 0); /* STDIN  (0) = read packets from TLS (p_to_ppp[0]) */
+		dup(session.srv_in_fd, 1);  /* STDOUT (1) = write packets to TLS (p_from_ppp[1]) */
+		close(session.srv_out_fd);
+		close(session.srv_in_fd);
+		close(session.pipe_in);
+		close(session.pipe_out);
+
+		{
+			FortinetPriv *priv = session.priv;
+			char *iparg = (priv && priv->ip[0]) ? priv->ip : nil;
+
+			if(cfg.verbose)
+				print("vpnfs: starting /bin/ip/ppp -P -m 1400 %s...\n", iparg ? iparg : "");
+
+			if(iparg != nil)
+				execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", iparg, nil);
+			else
+				execl("/bin/ip/ppp", "ppp", "-P", "-m", "1400", nil);
+		}
 		fprint(2, "vpnfs: exec /bin/ip/ppp failed: %r\n");
 		exits("exec ppp failed");
 	}
 
+	/* Close held descriptors in parent that were dup'd into child */
+	close(session.srv_out_fd);
+	close(session.srv_in_fd);
+
 	/* Fork process for bi-directional I/O:
 	 * Parent: TLS -> Pipe Out (p_to_ppp[1] -> STDIN of ip/ppp)
-	 * Child:  Pipe In (p_from_ppp[0] <- STDOUT/mediaout of ip/ppp) -> TLS
+	 * Child:  Pipe In (p_from_ppp[0] <- STDOUT of ip/ppp) -> TLS
 	 */
 	switch(rfork(RFPROC|RFFDG)){
 	case -1:
@@ -125,6 +151,7 @@ main(int argc, char *argv[])
 			if(driver->write_packet(&session, buf, n) < 0)
 				break;
 		}
+		postnote(PNGROUP, getpid(), "die");
 		exits(nil);
 	default:
 		/* Parent process: read packets from TLS tunnel and write to system pipe */
@@ -135,6 +162,7 @@ main(int argc, char *argv[])
 				break;
 		}
 		driver->close(&session);
+		postnote(PNGROUP, getpid(), "die");
 		exits(nil);
 	}
 }

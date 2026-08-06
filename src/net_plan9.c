@@ -260,30 +260,6 @@ vpn_http_get_tunnel(int fd, char *host, char *port, char *cookie)
 	return 0;
 }
 
-static int
-vpn_post_srv(char *name, int fd)
-{
-	char path[64];
-	int sfd;
-
-	snprint(path, sizeof(path), "/srv/%s", name);
-	remove(path); /* Clean up stale posting if it exists */
-
-	sfd = create(path, OWRITE, 0666);
-	if(sfd < 0){
-		fprint(2, "vpnfs: create %s failed: %r\n", path);
-		return -1;
-	}
-
-	if(fprint(sfd, "%d", fd) < 0){
-		close(sfd);
-		return -1;
-	}
-
-	close(sfd);
-	return 0;
-}
-
 int
 vpn_create_pipes(VpnSession *s)
 {
@@ -294,24 +270,21 @@ vpn_create_pipes(VpnSession *s)
 		return -1;
 	}
 
-	/* TLS -> ip/ppp STDIN:
-	 * vpnfs writes TLS packets to s->pipe_out (p_to_ppp[1]),
+	/* TLS -> ip/ppp STDIN (0):
+	 * vpnfs writes incoming TLS packets to s->pipe_out (p_to_ppp[1]),
 	 * ip/ppp reads STDIN (0) from p_to_ppp[0].
 	 */
 	s->pipe_out = p_to_ppp[1];
 	s->srv_out_fd = p_to_ppp[0];
 
-	/* ip/ppp -p /srv/vpnfs.out -> TLS:
-	 * ip/ppp writes outgoing network packets to /srv/vpnfs.out (p_from_ppp[1]),
+	/* ip/ppp STDOUT (1) -> TLS:
+	 * ip/ppp writes outgoing network packets to STDOUT (1) (p_from_ppp[1]),
 	 * vpnfs reads from s->pipe_in (p_from_ppp[0]) to send over TLS.
 	 */
 	s->pipe_in = p_from_ppp[0];
 	s->srv_in_fd = p_from_ppp[1];
 
-	snprint(s->ttyname, sizeof(s->ttyname), "/srv/vpnfs.out");
-
-	if(vpn_post_srv("vpnfs.in", s->srv_out_fd) < 0) return -1;
-	if(vpn_post_srv("vpnfs.out", s->srv_in_fd) < 0) return -1;
+	snprint(s->ttyname, sizeof(s->ttyname), "stdio");
 
 	return 0;
 }
