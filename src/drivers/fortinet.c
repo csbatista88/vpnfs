@@ -633,12 +633,12 @@ fortinet_connect_tunnel(VpnSession *s)
 static int
 fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 {
-	uchar hdr[2];
+	uchar hdr[6];
 	uchar payload[VPN_BUFSIZE];
 	uchar frame[VPN_BUFSIZE];
-	int len;
+	int total, magic, len;
 
-	if(readn(s->tls_fd, hdr, 2) != 2)
+	if(readn(s->tls_fd, hdr, 6) != 6)
 		return -1;
 
 	/* Intercept HTTP error status if FortiGate rejects the tunnel upgrade */
@@ -654,7 +654,9 @@ fortinet_read_packet(VpnSession *s, uchar *buf, int maxlen)
 		return -1;
 	}
 
-	len = (hdr[0] << 8) | hdr[1];
+	total = (hdr[0] << 8) | hdr[1];
+	magic = (hdr[2] << 8) | hdr[3];
+	len   = (hdr[4] << 8) | hdr[5];
 
 	if(len < 0 || len > sizeof(payload))
 		return -1;
@@ -687,7 +689,7 @@ fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 {
 	FortinetPriv *priv = s->priv;
 	uchar payload[VPN_BUFSIZE];
-	uchar hdr[2];
+	uchar hdr[6];
 	int i, start, lastflag, rawlen, rest;
 
 	if(priv == nil)
@@ -712,9 +714,14 @@ fortinet_write_packet(VpnSession *s, uchar *buf, int len)
 					rawlen -= 2;
 				}
 				if(rawlen >= 2){
-					hdr[0] = (rawlen >> 8) & 0xFF;
-					hdr[1] = rawlen & 0xFF;
-					if(write(s->tls_fd, hdr, 2) != 2 ||
+					hdr[0] = ((6 + rawlen) >> 8) & 0xFF;
+					hdr[1] = (6 + rawlen) & 0xFF;
+					hdr[2] = 0x50; /* 'P' */
+					hdr[3] = 0x50; /* 'P' */
+					hdr[4] = (rawlen >> 8) & 0xFF;
+					hdr[5] = rawlen & 0xFF;
+
+					if(write(s->tls_fd, hdr, 6) != 6 ||
 					   write(s->tls_fd, payload, rawlen) != rawlen){
 						priv->txlen = 0;
 						return -1;
